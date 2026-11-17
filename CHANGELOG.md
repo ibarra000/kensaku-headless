@@ -6,10 +6,14 @@ versioning: [SemVer](https://semver.org/).
 ## [1.0.18] — unreleased
 
 ### Added
-- **Markdown documents are indexed and previewed** (#139, #44). Headings,
-  lists, code blocks and inline formatting become clean searchable text instead
-  of raw punctuation, and the preview renders the document rather than its
-  source.
+- **Cleaner Markdown search text and previews** (#139, #44). `.md` and
+  `.markdown` files keep the existing plain-text reader, but link and image
+  destinations, image paths with empty alt text, and top-level code-fence markers
+  are stripped from what is indexed, from result snippets and from previews. Link
+  labels, alt text, frontmatter and code inside fences stay searchable. This is
+  clean-up, not a renderer: previews still show the document as text.
+  `.markdown` files also get the document category, the category filter and the
+  language facet, including uppercase `.MARKDOWN`.
 - **Email bodies stored only as HTML or RTF are indexed** (#167, follow-up to
   #63). Some `.msg` files keep no plain-text body at all; those messages were
   indexed by subject only.
@@ -44,10 +48,12 @@ versioning: [SemVer](https://semver.org/).
   WebView2 start whose profile is still busy is retried instead of failing.
 - **Reopening the index no longer fails when Tantivy's writer lock is busy**
   (#191).
-- **Windows test binaries link the Common Controls v6 manifest**, so the test
-  harness matches the shipped binary (#192).
 
 ### Changed
+- **Windows test binaries link the Common Controls v6 manifest**, so the test
+  harness matches the shipped executable (#192). CI only; no runtime change.
+- Existing index and configuration are reused as-is. The new extraction applies
+  to newly indexed or modified files; re-run a folder to apply it retroactively.
 - `mail-parser` 0.11.9 → 1.0.1, `cfb` 0.14 → 0.16, `parking_lot` 0.12 → 0.13,
   `notify` → 8.2.2, `interprocess` → 2.4.8.
 
