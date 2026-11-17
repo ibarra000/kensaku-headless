@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://upstar.dev/r/yjid/kensaku"><img alt="Upstar trending" src="https://upstar.dev/badge/yjid/kensaku.svg" /></a>
+  <a href="https://upstar.dev/r/yjid/kensaku"><picture><source media="(prefers-color-scheme: dark)" srcset="https://upstar.dev/badge/yjid/kensaku/day/windows-dark.svg"><img alt="Upstar: #1 Riser Of The Day in Windows, October 29, 2026" src="https://upstar.dev/badge/yjid/kensaku/day/windows.svg" width="250" height="55"></picture></a>
 </p>
 
 <p align="center">
