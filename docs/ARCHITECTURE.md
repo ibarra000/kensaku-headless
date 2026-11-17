@@ -297,8 +297,10 @@ update is available, Settings → About shows the release notes, asset size, and
 progress; download is bounded, compared with the expected size, and verified
 against the release's `SHA256SUMS`. The installer runs detached and the app
 shuts down cleanly to avoid a process lock. Portable installs are told to
-replace the folder instead of being handed a second installation. Builds remain
-unsigned; see [INSTALL.md](INSTALL.md).
+replace the folder instead of being handed a second installation. Windows
+binaries are Authenticode-signed through SignPath Foundation in the release
+workflow; macOS remains unsigned. See [SIGNING.md](SIGNING.md) and
+[INSTALL.md](INSTALL.md).
 
 ## 11. Tests and benchmarks
 
@@ -319,7 +321,7 @@ unsigned; see [INSTALL.md](INSTALL.md).
   visual tier is skipped and `similar_images` self-hides.
 - No native macOS/Windows OCR.
 - No ANN index at desktop scale; exact scan is faster and exact.
-- No code signing yet; macOS and Windows warn on first launch.
+- No macOS code signing or notarisation yet; Windows is Authenticode-signed.
 
 ## 13. Module map
 

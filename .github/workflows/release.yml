@@ -1,9 +1,13 @@
 name: Release builds
 
-# Builds unsigned desktop bundles and the agent CLI for Linux, macOS and
-# Windows, then assembles a draft GitHub release with every asset and a
-# SHA256SUMS file. A maintainer reviews and publishes the draft; signing
-# secrets are still intentionally absent from this workflow.
+# Builds desktop bundles and the agent CLI for Linux, macOS and
+# Windows, Authenticode-signs the Windows binaries through SignPath
+# Foundation, then assembles a draft GitHub release with every asset and a
+# SHA256SUMS file. A maintainer reviews and publishes the draft.
+#
+# Signing is mandatory for tag builds: if the SignPath variables/secrets are
+# missing, the Windows jobs fail instead of silently shipping unsigned
+# installers. macOS remains unsigned until an Apple Developer ID exists.
 on:
   push:
     tags:
@@ -12,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -47,6 +52,30 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # SignPath Foundation issues the Authenticode certificate; the private
+      # key stays on SignPath's HSM. Configuration lives in repository
+      # variables plus one secret (see docs/SIGNING.md). Failing here is
+      # deliberate: a tag build must not ship unsigned installers.
+      - name: Check Windows signing configuration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $missing = @()
+          if (-not $env:SIGNPATH_ORGANIZATION_ID) { $missing += 'variable SIGNPATH_ORGANIZATION_ID' }
+          if (-not $env:SIGNPATH_PROJECT_SLUG) { $missing += 'variable SIGNPATH_PROJECT_SLUG' }
+          if (-not $env:SIGNPATH_SIGNING_POLICY_SLUG) { $missing += 'variable SIGNPATH_SIGNING_POLICY_SLUG' }
+          if (-not $env:SIGNPATH_ARTIFACT_CONFIGURATION_SLUG) { $missing += 'variable SIGNPATH_ARTIFACT_CONFIGURATION_SLUG' }
+          if (-not $env:SIGNPATH_API_TOKEN) { $missing += 'secret SIGNPATH_API_TOKEN' }
+          if ($missing.Count -gt 0) {
+            throw "SignPath signing is not configured; missing: $($missing -join ', '). See docs/SIGNING.md."
+          }
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -142,12 +171,114 @@ jobs:
           cp "$RUNNER_TEMP/onnxruntime-linux-x64-$version/lib/libonnxruntime.so.$version" src-tauri/libonnxruntime.so
           test -s src-tauri/libonnxruntime.so
 
-      # Unsigned builds: no certificates or notarization secrets are required.
-      # To sign later, add the Apple/Windows secrets and the relevant Tauri
-      # signing env vars here (macOS: APPLE_CERTIFICATE, APPLE_SIGNING_IDENTITY,
-      # APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID; Windows: WINDOWS_CERTIFICATE).
-      - name: Build bundles
-        run: bunx tauri build ${{ matrix.args }}
+      # Build first without bundling, so the application executable can be
+      # signed before it is embedded in the NSIS and MSI installers.
+      - name: Build app binary
+        run: bunx tauri build --no-bundle ${{ matrix.args }}
+
+      - name: Prepare app binary for signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path signing\app | Out-Null
+          $exe = "src-tauri\target\release\kensaku.exe"
+          if (-not (Test-Path $exe)) { throw "kensaku.exe was not built" }
+          Copy-Item $exe signing\app\kensaku.exe
+
+      - name: Upload unsigned app binary
+        if: runner.os == 'Windows'
+        id: upload-app
+        uses: actions/upload-artifact@v7
+        with:
+          name: sign-app-${{ matrix.arch }}
+          path: signing/app
+          retention-days: 1
+
+      - name: Sign app binary
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signing/signed-app
+
+      - name: Restore signed app binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Recurse -File signing\signed-app -Filter kensaku.exe | Select-Object -First 1
+          if (-not $signed) { throw "SignPath did not return a signed kensaku.exe" }
+          $sig = Get-AuthenticodeSignature $signed.FullName
+          if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+            throw "kensaku.exe came back without a valid signature ($($sig.Status))"
+          }
+          Write-Host "kensaku.exe: $($sig.Status) by $($sig.SignerCertificate.Subject)"
+          Copy-Item $signed.FullName src-tauri\target\release\kensaku.exe -Force
+
+      # `--no-binary-patching` keeps that signature valid: otherwise Tauri
+      # rewrites the executable in place per bundle type to embed updater
+      # metadata, which invalidates Authenticode. Kensaku does not use Tauri's
+      # updater artifacts, so the metadata is not needed.
+      - name: Bundle installers
+        run: bunx tauri bundle ${{ runner.os == 'Windows' && '--no-binary-patching' || '' }} ${{ matrix.args }}
+
+      - name: Prepare installers for signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path signing\installers | Out-Null
+          Copy-Item src-tauri\target\release\bundle\nsis\*-setup.exe signing\installers\
+          Copy-Item src-tauri\target\release\bundle\msi\*.msi signing\installers\
+          $files = @(Get-ChildItem signing\installers -File)
+          if ($files.Count -lt 2) { throw "expected an NSIS setup.exe and an MSI, found $($files.Count)" }
+
+      - name: Upload unsigned installers
+        if: runner.os == 'Windows'
+        id: upload-installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: sign-installers-${{ matrix.arch }}
+          path: signing/installers
+          retention-days: 1
+
+      - name: Sign installers
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-installers.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signing/signed-installers
+
+      - name: Restore signed installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signed = @(Get-ChildItem -Recurse -File signing\signed-installers |
+            Where-Object { $_.Extension -in '.exe', '.msi' })
+          if ($signed.Count -eq 0) { throw "SignPath did not return any signed installers" }
+          foreach ($file in $signed) {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+              throw "$($file.Name) came back without a valid signature ($($sig.Status))"
+            }
+            $dest = Get-ChildItem -Recurse -File src-tauri\target\release\bundle -Filter $file.Name |
+              Select-Object -First 1
+            if (-not $dest) { throw "no bundle destination for $($file.Name)" }
+            Copy-Item $file.FullName $dest.FullName -Force
+            Write-Host "$($file.Name): $($sig.Status) by $($sig.SignerCertificate.Subject)"
+          }
 
       # Portable build: the raw exe plus a `portable` marker file so
       # KensakuConfig::config_dir keeps everything (config, metadata DB,
@@ -226,6 +357,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Same mandatory check as the bundle job: the Windows CLI binaries are
+      # what users run from a terminal, so they are signed too.
+      - name: Check Windows signing configuration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $missing = @()
+          if (-not $env:SIGNPATH_ORGANIZATION_ID) { $missing += 'variable SIGNPATH_ORGANIZATION_ID' }
+          if (-not $env:SIGNPATH_PROJECT_SLUG) { $missing += 'variable SIGNPATH_PROJECT_SLUG' }
+          if (-not $env:SIGNPATH_SIGNING_POLICY_SLUG) { $missing += 'variable SIGNPATH_SIGNING_POLICY_SLUG' }
+          if (-not $env:SIGNPATH_ARTIFACT_CONFIGURATION_SLUG) { $missing += 'variable SIGNPATH_ARTIFACT_CONFIGURATION_SLUG' }
+          if (-not $env:SIGNPATH_API_TOKEN) { $missing += 'secret SIGNPATH_API_TOKEN' }
+          if ($missing.Count -gt 0) {
+            throw "SignPath signing is not configured; missing: $($missing -join ', '). See docs/SIGNING.md."
+          }
+
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -301,6 +454,44 @@ jobs:
           $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
           Copy-Item cli/target/release/kensaku-cli.exe "dist/kensaku-cli-windows-$arch.exe"
 
+      - name: Upload unsigned CLI for signing
+        if: runner.os == 'Windows'
+        id: upload-cli
+        uses: actions/upload-artifact@v7
+        with:
+          name: sign-cli-${{ matrix.artifact }}
+          path: dist/kensaku-cli-windows-*.exe
+          retention-days: 1
+
+      - name: Sign CLI
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-cli.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed-cli
+
+      - name: Restore signed CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signed = @(Get-ChildItem -Recurse -File signed-cli -Filter kensaku-cli-windows-*.exe)
+          if ($signed.Count -eq 0) { throw "SignPath did not return a signed CLI binary" }
+          foreach ($file in $signed) {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+              throw "$($file.Name) came back without a valid signature ($($sig.Status))"
+            }
+            Write-Host "$($file.Name): $($sig.Status) by $($sig.SignerCertificate.Subject)"
+            Copy-Item $file.FullName "dist\$($file.Name)" -Force
+          }
+
       - name: Upload CLI
         uses: actions/upload-artifact@v7
         with:
@@ -329,10 +520,14 @@ jobs:
       - name: Checkout (for release notes generation)
         uses: actions/checkout@v7
 
+      # Only the final artifacts: the `sign-*` intermediates contain the
+      # unsigned files that SignPath needs, and must never be staged as
+      # release assets.
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: kensaku-*
           merge-multiple: true
 
       - name: Check artifacts arrived

@@ -145,9 +145,9 @@ Download the bundle for your system from the [latest release](https://github.com
 
 Every release also ships `SHA256SUMS` so you can verify what you downloaded. The 1.0.16 Windows x64 downloads are a **14.3 MB** NSIS setup and a **20.1 MB** MSI; the installed app binary is about **36 MB**.
 
-Builds are not yet code-signed, so macOS and Windows show a warning the first time. That is expected for an independent app, not a sign of a problem.
+Windows builds are Authenticode-signed through [SignPath Foundation](https://signpath.org/), so the publisher is named and SmartScreen reputation can build. macOS builds are not signed or notarised yet, so Gatekeeper blocks them the first time.
 
-- **Windows:** on the SmartScreen prompt, click **More info** → **Run anyway**.
+- **Windows:** the installer and app are signed. If SmartScreen still shows a reputation warning for a brand-new release, click **More info** → **Run anyway**.
 - **macOS:** open the app, then go to System Settings → Privacy & Security and click **Open Anyway**.
 
 [docs/INSTALL.md](docs/INSTALL.md) has the full steps.
@@ -267,7 +267,7 @@ Full threat model: [SECURITY.md](SECURITY.md).
 
 **Known limitations**
 
-- Builds are not yet code-signed. In-app updating works, but macOS and Windows still warn on first install.
+- Windows builds are Authenticode-signed (SignPath Foundation); macOS builds are not signed or notarised yet, so Gatekeeper warns on first launch.
 - OCR: PP-OCRv6 by default (bundled runtime, ~6.1 MB model pack); optional Indra engine with deskew and multi-script recognition (~27 MB pack). Intel Macs fall back to Tesseract. JPEG 2000, fax, and JBIG2 scans are not decoded yet.
 - Thumbnails cover image files only. Documents and code show type icons.
 - Visual search is a beta model download and is not part of search results yet.
@@ -280,7 +280,7 @@ Kensaku is actively built, and the roadmap bends toward what people ask for. Som
 - **A glass theme — and more customization.** A translucent, vibrancy-style finish, with adjustable density, accents, and per-surface control. The current light/dark pair is the floor, not the ceiling. → [vote & discuss](https://github.com/yjid/kensaku/discussions/36)
 - **App search and launch.** Type "term", open Terminal. Installed applications join the same instant index, so the launcher stops where your files end and your tools begin. → [vote & discuss](https://github.com/yjid/kensaku/discussions/37)
 - **Internet quick search.** For the things your files can't answer — opt-in, off by default, clearly separated from local results so the local-first promise stays intact. → [vote & discuss](https://github.com/yjid/kensaku/discussions/38)
-- **Signed builds and notarization.** In-app updates ship now; a paid signing identity is the missing piece for a warning-free first install. → [vote & discuss](https://github.com/yjid/kensaku/discussions/40)
+- **macOS signing and notarization.** Windows installers are Authenticode-signed now; an Apple Developer ID is the missing piece for a warning-free first launch on macOS. → [vote & discuss](https://github.com/yjid/kensaku/discussions/40)
 - **Visual and related-file agents.** Text-to-image and similar-image lookup once a real visual encoder is wired into search; `find_related` for same-stem/import/neighbour lookups. → [vote & discuss](https://github.com/yjid/kensaku/discussions/39)
 
 None of this ships on a promise — it ships in the order the community pushes. **You tell us:** open a [discussion](https://github.com/yjid/kensaku/discussions) with your use case, or upvote an existing idea in the [issue tracker](https://github.com/yjid/kensaku/issues). The loudest real-world need gets the next slot.

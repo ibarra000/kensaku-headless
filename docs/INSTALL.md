@@ -15,24 +15,31 @@ Download from [Releases](https://github.com/yjid/kensaku/releases).
 | Windows on ARM | `kensaku_<ver>_arm64-setup.exe`, `kensaku_<ver>_arm64_en-US.msi`, `kensaku-portable-<ver>-arm64.zip`, `kensaku-cli-windows-aarch64.exe` | native ARM64 (Snapdragon) builds; same layout as x64 |
 | Agent CLI | `kensaku-cli-{linux,macos,windows}-*` | Standalone CLI/MCP binary for each platform. |
 
-### The builds are unsigned
+### Signing
 
-This is the honest trade-off for a project without a paid signing identity yet.
+**Windows.** Installers, the portable `kensaku.exe` and the Windows CLI are
+Authenticode-signed through [SignPath Foundation](https://signpath.org/), so
+the publisher name appears in the UAC prompt and SmartScreen reputation can
+build. SignPath Foundation vouches that the binary was built from this
+repository; the private key never leaves their HSM. Verify with:
 
-**macOS.** Gatekeeper will block the first launch. Either right-click the app →
-**Open** → **Open**, or clear the quarantine flag:
+```powershell
+Get-AuthenticodeSignature .\kensaku_<ver>_x64-setup.exe | Format-List Status, SignerCertificate
+```
+
+**macOS.** Not signed or notarised yet, so Gatekeeper blocks the first launch.
+Either right-click the app → **Open** → **Open**, or clear the quarantine flag:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Kensaku.app
 ```
 
-**Windows.** SmartScreen shows "Windows protected your PC". Choose **More info** →
-**Run anyway**.
+**Linux.** No signing step; the AppImage may need `--no-sandbox` on hardened
+distros.
 
-**Linux.** No signing step; AppImage may need `--no-sandbox` on hardened distros.
-
-If your organization requires signed binaries, build from source or wait for
-notarized releases. Verify downloads with the published `SHA256SUMS`.
+Every release still ships `SHA256SUMS`; verify any platform with
+`sha256sum -c SHA256SUMS`. Build and signing details are in
+[SIGNING.md](SIGNING.md).
 
 ---
 
