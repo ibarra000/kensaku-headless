@@ -3,6 +3,54 @@
 All notable changes to Kensaku. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning: [SemVer](https://semver.org/).
 
+## [1.0.18] — unreleased
+
+### Added
+- **Markdown documents are indexed and previewed** (#139, #44). Headings,
+  lists, code blocks and inline formatting become clean searchable text instead
+  of raw punctuation, and the preview renders the document rather than its
+  source.
+- **Email bodies stored only as HTML or RTF are indexed** (#167, follow-up to
+  #63). Some `.msg` files keep no plain-text body at all; those messages were
+  indexed by subject only.
+- **Per-directory indexing mode: names only, or names and content.** New
+  `name_only_dirs` setting (and a "Names only" switch next to each folder in
+  Settings → Folders). Files below a listed directory stay searchable by name
+  and path but are never read, OCR'd or embedded, which keeps media libraries,
+  archives and network shares cheap to index. Switching a directory over drops
+  its content documents and semantic units; switching it back queues its files
+  for extraction. An empty list keeps today's behavior. (#145, #140)
+- **Setup can be cancelled, and folders can be changed while the first scan is
+  running** (#188, #164).
+
+### Fixed
+- **Renaming a folder no longer loses its indexed files on Windows** (#187). A
+  rename arrives as one event for the directory; the watcher now re-indexes the
+  children it gained.
+- **Folders starting with a dot are indexed again when "Skip hidden files" is
+  off** (#179, #178).
+- **The semantic tier no longer returns letter-soup matches** (#177).
+- **The first scan no longer oversubscribes every core** (#172, #170). OCR
+  inference threads are bounded and UI-priority work is isolated from background
+  OCR.
+- **A stale or truncated Indra pack is detected, and the self-test result is no
+  longer cached forever.** Indra now reports how many lines the detector found
+  and how many the recognizer read, so a failure says which half broke (#174).
+- **The headless Linux daemon no longer stalls at `0/N` during extraction, and
+  tries every candidate socket path before giving up** (#180). The extraction
+  pipeline could deadlock when the CPU quota was one.
+- **Custom CA bundles and the system trust store are honoured** (#171, #169).
+- **The health check no longer reports a false crash-log warning** (#176), and a
+  WebView2 start whose profile is still busy is retried instead of failing.
+- **Reopening the index no longer fails when Tantivy's writer lock is busy**
+  (#191).
+- **Windows test binaries link the Common Controls v6 manifest**, so the test
+  harness matches the shipped binary (#192).
+
+### Changed
+- `mail-parser` 0.11.9 → 1.0.1, `cfb` 0.14 → 0.16, `parking_lot` 0.12 → 0.13,
+  `notify` → 8.2.2, `interprocess` → 2.4.8.
+
 ## [1.0.17] — 2026-11-09
 
 ### Added
@@ -18,12 +66,6 @@ versioning: [SemVer](https://semver.org/).
   files. History is deduplicated case-insensitively and an extended query
   replaces its shorter prefix. It lives in memory, so it is cleared when
   Kensaku quits or from the row's Clear action.
-- **Per-directory indexing mode: names only, or names and content.** New `name_only_dirs`
-  setting (and a "Names only" switch next to each folder in Settings → Folders). Files below a
-  listed directory stay searchable by name and path but are never read, OCR'd or embedded,
-  which keeps media libraries, archives and network shares cheap to index. Switching a
-  directory over drops its content documents and semantic units; switching it back queues its
-  files for extraction. An empty list keeps today's behavior.
 
 ### Fixed
 - **Every first scan reported itself as a health warning** (#142, #146). The
