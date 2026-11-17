@@ -1134,6 +1134,21 @@ pub async fn run_setup_again() -> Result<(), String> {
     Ok(())
 }
 
+/// Stops the first-run crawl and sends the wizard back to folder selection.
+#[tauri::command]
+pub async fn cancel_setup_scan(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(daemon) = state.daemon.as_ref() {
+        daemon.cancel_setup_scan()?;
+        // The daemon saved the config; keep this window's copy in agreement.
+        let mut config = state.indexer.config.write();
+        config.is_setup_complete = false;
+        config.first_scan_done = false;
+        Ok(())
+    } else {
+        state.indexer.cancel_setup_scan()
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_setup(
@@ -1185,7 +1200,7 @@ pub async fn complete_setup(
         // (which owns them) to rescan instead.
         daemon.rescan()?;
     } else {
-        state.indexer.start_indexing();
+        state.indexer.start_indexing_when_idle();
     }
 
     // The wizard keeps the window in taskbar mode while it indexes. The

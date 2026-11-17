@@ -17,7 +17,7 @@ use crate::indexer::content::{
 };
 use crate::indexer::extract::IndexMode;
 use crate::indexer::metadata::MetadataStore;
-use crate::indexer::walker::{FileEntry, is_cloud_placeholder_path, walk_directories};
+use crate::indexer::walker::{FileEntry, is_cloud_placeholder_path, walk_directories_until};
 use crate::indexer::watcher::{WatcherHandle, start_file_watcher};
 use crate::search::{SearchDispatcher, SearchResponse, SortOrder};
 use parking_lot::{Mutex, RwLock};
@@ -101,6 +101,12 @@ struct ExtractJob {
     is_image: bool,
     /// The pixels changed (or the row is new), so any stored dHash is stale.
     phash_needs_refresh: bool,
+}
+
+/// Whether a finished crawl should record the first scan as done. A cancelled
+/// crawl never does, so the setup wizard returns to folder selection.
+fn marks_first_scan_done(is_setup_complete: bool, first_scan_done: bool, cancelled: bool) -> bool {
+    is_setup_complete && !first_scan_done && !cancelled
 }
 
 /// Crawl order: text before images, newest first within each class, then size.
@@ -344,6 +350,8 @@ pub struct IndexerManager {
     /// True while a live filesystem watcher is running.
     pub watcher_ok: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
+    /// Set to ask the running crawl to stop early. Cleared when a crawl starts.
+    cancel_requested: Arc<AtomicBool>,
     watcher_handle: Arc<Mutex<Option<WatcherHandle>>>,
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
 }
@@ -466,6 +474,7 @@ impl IndexerManager {
             last_reconcile_unix_secs: Arc::new(AtomicU64::new(0)),
             watcher_ok: Arc::new(AtomicBool::new(false)),
             is_running: Arc::new(AtomicBool::new(false)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             watcher_handle: Arc::new(Mutex::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
         }
@@ -526,6 +535,7 @@ impl IndexerManager {
             last_reconcile_unix_secs: Arc::new(AtomicU64::new(0)),
             watcher_ok: Arc::new(AtomicBool::new(false)),
             is_running: Arc::new(AtomicBool::new(false)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             watcher_handle: Arc::new(Mutex::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
         }
@@ -659,6 +669,7 @@ impl IndexerManager {
             // Already running
             return;
         }
+        self.cancel_requested.store(false, Ordering::SeqCst);
 
         // Stop any watcher left over from a previous indexing run so we never
         // end up with duplicate watchers on the same directories.
@@ -683,6 +694,7 @@ impl IndexerManager {
         let config_arc = Arc::clone(&self.config);
         let status = Arc::clone(&self.status);
         let is_running = Arc::clone(&self.is_running);
+        let cancel_requested = Arc::clone(&self.cancel_requested);
         let watcher_handle = Arc::clone(&self.watcher_handle);
         let app_handle = Arc::clone(&self.app_handle);
         let crawl_start_unix_ms = Arc::clone(&self.crawl_start_unix_ms);
@@ -788,8 +800,13 @@ impl IndexerManager {
             }
 
             // Phase 1: Collect all entries (jwalk is already parallel internally).
-            let all_entries =
-                walk_directories(&watched_dirs, &excluded_dirs, include_ignored, skip_hidden);
+            let all_entries = walk_directories_until(
+                &watched_dirs,
+                &excluded_dirs,
+                include_ignored,
+                skip_hidden,
+                &cancel_requested,
+            );
             let total_entries = all_entries.len();
             if !quiet {
                 let mut st = status.write();
@@ -804,6 +821,9 @@ impl IndexerManager {
             let mut to_extract: Vec<ExtractJob> = Vec::new();
 
             for entry in all_entries {
+                if cancel_requested.load(Ordering::Relaxed) {
+                    break;
+                }
                 files_count += 1;
 
                 // Skip files whose extension is in the excluded list.
@@ -998,6 +1018,7 @@ impl IndexerManager {
             let producer_status = Arc::clone(&status);
             let producer_app = Arc::clone(&app_handle);
             let producer_config = Arc::clone(&config_arc);
+            let producer_cancel = Arc::clone(&cancel_requested);
             let battery_state = Arc::new(Mutex::new((Instant::now(), false)));
             let pace_gate = Arc::new(Mutex::new(Instant::now()));
             let producer_query_flag = Arc::clone(&query_in_flight);
@@ -1016,6 +1037,9 @@ impl IndexerManager {
 
                 scope.spawn(move || {
                     to_extract.par_iter().for_each_with(tx, |tx, job| {
+                        if producer_cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
                         Self::wait_while_paused(&producer_config, &producer_status, &producer_app);
                         // Search comes first: a user waiting on results must not
                         // queue behind a background scan.
@@ -1359,7 +1383,12 @@ impl IndexerManager {
             };
 
             // Drop metadata entries for files that no longer exist on disk.
-            let stale_paths: Vec<PathBuf> = {
+            // A cancelled crawl did not see every file, so "not seen" does not
+            // mean "deleted": skip the sweep and let the next crawl decide.
+            let crawl_cancelled = cancel_requested.load(Ordering::SeqCst);
+            let stale_paths: Vec<PathBuf> = if crawl_cancelled {
+                Vec::new()
+            } else {
                 let store = metadata.read();
                 (0..store.len())
                     .filter_map(|i| {
@@ -1475,7 +1504,11 @@ impl IndexerManager {
             // First-scan completion gate: the first full crawl marks setup done.
             {
                 let mut cfg = config_arc.write();
-                if cfg.is_setup_complete && !cfg.first_scan_done {
+                if marks_first_scan_done(
+                    cfg.is_setup_complete,
+                    cfg.first_scan_done,
+                    cancel_requested.load(Ordering::SeqCst),
+                ) {
                     cfg.first_scan_done = true;
                     let _ = cfg.save();
                 }
@@ -2171,6 +2204,21 @@ impl IndexerManager {
         self.start_indexing_when_idle();
     }
 
+    /// Asks the running crawl to stop at its next safe point.
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Stops the first-run crawl and returns setup to folder selection, so the
+    /// next launch shows the folder picker instead of resuming the scan.
+    pub fn cancel_setup_scan(&self) -> Result<(), String> {
+        self.request_cancel();
+        let mut config = self.config.write();
+        config.is_setup_complete = false;
+        config.first_scan_done = false;
+        config.save()
+    }
+
     pub fn start_indexing_when_idle(self: &Arc<Self>) {
         if !self.config.read().is_setup_complete {
             return;
@@ -2506,6 +2554,18 @@ mod tests {
             char_bloom: 0,
             content_pending,
         }
+    }
+
+    #[test]
+    fn cancelled_crawl_does_not_mark_first_scan_done() {
+        // Normal first scan finishing.
+        assert!(marks_first_scan_done(true, false, false));
+        // The user cancelled: setup must stay unfinished.
+        assert!(!marks_first_scan_done(true, false, true));
+        // Later crawls leave an already-finished first scan alone.
+        assert!(!marks_first_scan_done(true, true, false));
+        // Setup was never configured.
+        assert!(!marks_first_scan_done(false, false, false));
     }
 
     #[test]
