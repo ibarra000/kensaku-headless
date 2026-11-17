@@ -51,6 +51,19 @@ tag build can never quietly ship unsigned installers.
    gh secret set SIGNPATH_API_TOKEN
    ```
 
+Copy `SIGNPATH_ORGANIZATION_ID` from the SignPath URL (`/Web/<organization-id>/…`)
+instead of retyping it. A single transposed character produces an error that
+looks like an authentication failure:
+
+```
+Unexpected response from the SignPath connector: ""
+```
+
+That message means the connector answered `401` with an empty body, which
+SignPath returns for an unknown organization *and* for a valid token without
+membership in the organization, so it cannot tell the two apart. Check the
+organization ID first, then the token.
+
 The first signing request may wait for manual approval in SignPath. The
 workflow waits up to 60 minutes (`wait-for-completion-timeout-in-seconds`).
 
@@ -90,8 +103,12 @@ MSI installers contain a signed executable, not just a signed wrapper.
 5. The portable zip is assembled from the signed executable.
 6. The Windows CLI binary is signed the same way in the CLI job.
 
-Every downloaded signed file is checked with `Get-AuthenticodeSignature`;
-`NotSigned` or `HashMismatch` fails the job. `SHA256SUMS` in the draft release
+Every downloaded signed file is checked with `Get-AuthenticodeSignature`. With
+`test-signing` the self-signed certificate reports `UnknownError` (untrusted
+root) even though the signature is intact, so `Valid` and `UnknownError` are
+accepted there. With `release-signing` only `Valid` is accepted: a certificate
+that does not chain to a public CA, or a signature that was invalidated after
+signing, fails the job instead of shipping. `SHA256SUMS` in the draft release
 is computed after signing, so the published hashes are hashes of the signed
 files.
 

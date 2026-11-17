@@ -211,11 +211,21 @@ jobs:
       - name: Restore signed app binary
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
         run: |
           $signed = Get-ChildItem -Recurse -File signing\signed-app -Filter kensaku.exe | Select-Object -First 1
           if (-not $signed) { throw "SignPath did not return a signed kensaku.exe" }
           $sig = Get-AuthenticodeSignature $signed.FullName
-          if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+          # `test-signing` uses a self-signed certificate, so Windows reports
+          # UnknownError (untrusted root) although the signature itself is
+          # intact. A release build must chain to a public CA, so demand Valid.
+          $okStatuses = if ($env:SIGNPATH_SIGNING_POLICY_SLUG -eq 'release-signing') {
+            @('Valid')
+          } else {
+            @('Valid', 'UnknownError')
+          }
+          if ($sig.Status -notin $okStatuses) {
             throw "kensaku.exe came back without a valid signature ($($sig.Status))"
           }
           Write-Host "kensaku.exe: $($sig.Status) by $($sig.SignerCertificate.Subject)"
@@ -264,13 +274,20 @@ jobs:
       - name: Restore signed installers
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
         run: |
           $signed = @(Get-ChildItem -Recurse -File signing\signed-installers |
             Where-Object { $_.Extension -in '.exe', '.msi' })
           if ($signed.Count -eq 0) { throw "SignPath did not return any signed installers" }
+          $okStatuses = if ($env:SIGNPATH_SIGNING_POLICY_SLUG -eq 'release-signing') {
+            @('Valid')
+          } else {
+            @('Valid', 'UnknownError')
+          }
           foreach ($file in $signed) {
             $sig = Get-AuthenticodeSignature $file.FullName
-            if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+            if ($sig.Status -notin $okStatuses) {
               throw "$($file.Name) came back without a valid signature ($($sig.Status))"
             }
             $dest = Get-ChildItem -Recurse -File src-tauri\target\release\bundle -Filter $file.Name |
@@ -480,12 +497,19 @@ jobs:
       - name: Restore signed CLI
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
         run: |
           $signed = @(Get-ChildItem -Recurse -File signed-cli -Filter kensaku-cli-windows-*.exe)
           if ($signed.Count -eq 0) { throw "SignPath did not return a signed CLI binary" }
+          $okStatuses = if ($env:SIGNPATH_SIGNING_POLICY_SLUG -eq 'release-signing') {
+            @('Valid')
+          } else {
+            @('Valid', 'UnknownError')
+          }
           foreach ($file in $signed) {
             $sig = Get-AuthenticodeSignature $file.FullName
-            if ($sig.Status -in @('NotSigned', 'HashMismatch')) {
+            if ($sig.Status -notin $okStatuses) {
               throw "$($file.Name) came back without a valid signature ($($sig.Status))"
             }
             Write-Host "$($file.Name): $($sig.Status) by $($sig.SignerCertificate.Subject)"
