@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <img src="assets/logo-light.svg" width="96" height="96" alt="Kensaku Headless logo">
+</picture>
+
 # Kensaku Headless
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ibarra000/kensaku-headless/ci.yml?branch=main)](https://github.com/ibarra000/kensaku-headless/actions/workflows/ci.yml)
@@ -12,6 +17,7 @@ API, an MCP server, and a Rust crate. No GUI.
 > search, OCR and agent engine are theirs; this fork removes the desktop app and
 > exposes everything through the CLI, daemon, HTTP and Rust APIs. If you want
 > the desktop app, use the original project.
+> The logo is a wireframe adaptation of Kensaku's mark.
 
 ## Install
 
