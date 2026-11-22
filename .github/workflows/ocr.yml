@@ -21,7 +21,7 @@ on:
   push:
     # Post-merge verification: the real-model jobs are the only place a
     # platform-specific OCR failure (like #174 on Fedora) can show up.
-    branches: ["master"]
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
 
