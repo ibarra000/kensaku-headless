@@ -1,15 +1,5 @@
-//! K12 index-format spike.
-//!
-//! Usage: `cargo run --release --example index_format_bench -- <tantivy|folded|fts5> <docs> <dir>`
-//!
-//! Builds a synthetic corpus, indexes it with the selected backend, measures
-//! index time/size/RSS and a small query mix, then optionally removes the
-//! scratch directory. `KEEP=1` keeps it for inspection.
-//!
-//! This is a benchmark harness only. It does not touch production indexes and
-//! deliberately disables SQLite durability (`journal_mode=OFF`) so index-build
-//! time is comparable to Tantivy's uncommitted arena rather than dominated by
-//! fsyncs. Query timings use the resulting on-disk indexes.
+//! Index-format benchmark: `cargo run --release --example index_format_bench -- <tantivy|folded|fts5> <docs> <dir>`.
+//! SQLite durability is off so build time compares with Tantivy's uncommitted arena; `KEEP=1` keeps the scratch dir.
 
 use kensaku_core::indexer::content::fold;
 use rusqlite::{Connection, params};

@@ -10,8 +10,7 @@ fn main() {
     let cli = args::Cli::parse();
 
     if let Some(dir) = &cli.data_dir {
-        // SAFETY: set before any thread is spawned; every later lookup of
-        // the data dir (and the spawned daemon) reads this variable.
+        // SAFETY: set before any thread spawns; all later data-dir lookups (and the daemon) read it.
         unsafe { std::env::set_var("KENSAKU_DATA_DIR", dir) };
     }
     if cli.no_daemon {

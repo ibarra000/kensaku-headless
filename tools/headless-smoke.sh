@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test of the headless `kensaku` binary.
-#
-#   tools/headless-smoke.sh [path/to/kensaku]
-#
-# Uses a throwaway data directory, so it never touches a real index. Starts
-# a daemon for that directory and always stops it on exit.
+# Headless end-to-end smoke test: `tools/headless-smoke.sh [path/to/kensaku]`; throwaway data dir, daemon always stopped.
 set -euo pipefail
 
 bin="${1:-target/debug/kensaku}"
@@ -57,8 +52,7 @@ k methods | grep -q '^search' || fail "methods list"
 expect_exit 2 k call no_such_method
 
 echo "== MCP stdio"
-# Capture first: `grep -q` would close the pipe early and, with pipefail,
-# turn the server's write error into a false failure.
+# Capture first: `grep -q` closes the pipe early, which pipefail turns into a false failure.
 mcp_out="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
                          '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | k mcp 2>/dev/null)"
 grep -q '"tools"' <<<"$mcp_out" || fail "mcp tools/list"

@@ -1,12 +1,5 @@
-//! Transport to the Kensaku daemon, the single index owner.
-//!
-//! The daemon speaks newline-delimited JSON-RPC 2.0 over a Unix domain socket
-//! or a Windows named pipe. Every request carries the token stored in
-//! `<data dir>/daemon.token` and the protocol version. The endpoint name is
-//! derived from the data directory, so daemons for different data dirs (for
-//! example a test's `KENSAKU_DATA_DIR`) never collide.
-//!
-//! [`server`] is the daemon side; this module is the client side.
+//! Daemon client: newline-delimited JSON-RPC 2.0 over a Unix socket / Windows named pipe.
+//! Requests carry the `<data dir>/daemon.token` token; endpoint names derive from the data dir.
 
 pub mod server;
 pub mod service;
@@ -20,14 +13,11 @@ use std::time::Duration;
 /// Wire protocol version. v2: the unified method table in [`crate::api`].
 pub const PROTOCOL_VERSION: u64 = 2;
 
-/// How long a CLI waits for a freshly spawned daemon to answer.
 const SPAWN_WAIT: Duration = Duration::from_secs(30);
 const SPAWN_POLL: Duration = Duration::from_millis(100);
-/// Per-request receive timeout (Unix sockets).
 #[cfg(unix)]
 const RECV_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Short stable id of the data directory, used in endpoint names.
 pub fn endpoint_id(config_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
     let normalized = config_dir.to_string_lossy().to_lowercase();
@@ -35,11 +25,7 @@ pub fn endpoint_id(config_dir: &Path) -> String {
     digest[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Unix socket paths to try, most specific first.
-///
-/// The daemon listens under `$XDG_RUNTIME_DIR` when set, otherwise in the
-/// data dir. A systemd *system* unit does not always export
-/// `XDG_RUNTIME_DIR` while an interactive shell does, so clients try both.
+/// Socket paths, most specific first: systemd system units may lack `XDG_RUNTIME_DIR`, so try both.
 fn socket_candidates(runtime: Option<&Path>, config_dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(runtime) = runtime {
@@ -54,7 +40,6 @@ pub fn socket_paths() -> Vec<PathBuf> {
     socket_candidates(runtime.as_deref(), &KensakuConfig::config_dir())
 }
 
-/// The path the daemon binds (see [`socket_paths`]).
 pub fn socket_path() -> PathBuf {
     socket_paths()
         .into_iter()
@@ -62,7 +47,6 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(|| KensakuConfig::config_dir().join("kensaku.sock"))
 }
 
-/// Windows named-pipe name for the current data dir.
 pub fn pipe_name() -> String {
     format!("kensaku-{}", endpoint_id(&KensakuConfig::config_dir()))
 }
@@ -114,7 +98,6 @@ fn connect() -> Result<interprocess::local_socket::Stream, ApiError> {
     }
 }
 
-/// Sends one JSON-RPC request to the daemon and returns its `result`.
 pub fn call(method: &str, params: Value) -> Result<Value, ApiError> {
     #[cfg(unix)]
     use interprocess::local_socket::traits::Stream as _;
@@ -164,17 +147,15 @@ pub fn call(method: &str, params: Value) -> Result<Value, ApiError> {
     Ok(response.get("result").cloned().unwrap_or(Value::Null))
 }
 
-/// [`call`] with the legacy `String` error used by the agent modules.
+/// [`call`] with a `String` error.
 pub fn request(method: &str, params: Value) -> Result<Value, String> {
     call(method, params).map_err(|e| e.message)
 }
 
-/// True when a daemon for the current data dir answers.
 pub fn is_running() -> bool {
     call("ping", json!({})).is_ok()
 }
 
-/// Validates the token and protocol version carried by an IPC request.
 pub fn authenticate(
     expected_token: &str,
     provided_token: Option<&str>,
@@ -195,8 +176,7 @@ pub fn authenticate(
     Ok(())
 }
 
-/// Asks the daemon to stop and waits until it has exited.
-/// `Ok(false)` when none was running.
+/// Asks the daemon to stop and waits for exit; `Ok(false)` when none was running.
 pub fn stop() -> Result<bool, ApiError> {
     if !is_running() {
         return Ok(false);
@@ -206,14 +186,12 @@ pub fn stop() -> Result<bool, ApiError> {
     Ok(true)
 }
 
-/// Waits until the daemon endpoint disappears after `shutdown`/`reset`, so
-/// the next command cannot reach the exiting process.
+/// Waits for the endpoint to disappear so the next command can't reach the exiting process.
 pub fn wait_stopped() -> Result<(), ApiError> {
     let deadline = std::time::Instant::now() + SPAWN_WAIT;
     while std::time::Instant::now() < deadline {
         if !is_running() {
-            // The endpoint closes a moment before the process exits and
-            // releases its files.
+            // The endpoint closes slightly before the process releases its files.
             std::thread::sleep(SPAWN_POLL * 3);
             return Ok(());
         }
@@ -222,15 +200,11 @@ pub fn wait_stopped() -> Result<(), ApiError> {
     Err(ApiError::new(ErrorCode::Busy, "the daemon did not stop in time"))
 }
 
-/// Starts a daemon when none answers, and waits until it does.
-///
-/// Returns `Ok(true)` when a daemon was spawned, `Ok(false)` when one was
-/// already running.
+/// Spawns a daemon if none answers; `Ok(true)` when one was spawned.
 pub fn ensure_running() -> Result<bool, ApiError> {
     match call("ping", json!({})) {
         Ok(_) => return Ok(false),
-        // Only a missing daemon is worth spawning; a bad token or protocol
-        // mismatch means one is running and a second would just exit.
+        // Bad token / protocol mismatch means one is running; don't spawn another.
         Err(e) if e.code != ErrorCode::DaemonUnavailable => return Err(e),
         Err(_) if std::env::var_os("KENSAKU_NO_DAEMON").is_some() => {
             return Err(unavailable("daemon disabled by KENSAKU_NO_DAEMON"));
@@ -252,7 +226,6 @@ pub fn ensure_running() -> Result<bool, ApiError> {
     )))
 }
 
-/// Daemon stdout/stderr log.
 pub fn log_path() -> PathBuf {
     KensakuConfig::config_dir().join("daemon.log")
 }
@@ -301,8 +274,7 @@ fn detach(command: &mut std::process::Command) {
 
 const BIN_NAME: &str = if cfg!(windows) { "kensaku.exe" } else { "kensaku" };
 
-/// Locates the `kensaku` binary: `KENSAKU_BIN`, the running executable when
-/// it *is* kensaku, a sibling of the running executable, then `PATH`.
+/// Locates `kensaku`: `KENSAKU_BIN`, current exe, sibling of current exe, then `PATH`.
 pub fn kensaku_binary() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("KENSAKU_BIN").map(PathBuf::from)
         && explicit.is_absolute()

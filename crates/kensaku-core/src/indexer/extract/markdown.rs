@@ -1,5 +1,4 @@
-//! Minimal search cleanup, not a Markdown renderer. Metadata and unsupported
-//! syntax are retained as text. Shared by indexing, snippets and previews.
+//! Minimal Markdown cleanup for search (not a renderer); shared by indexing, snippets and previews.
 use regex::Regex;
 use std::{path::Path, sync::OnceLock};
 
@@ -9,8 +8,7 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
-/// Remove top-level fence markers and common single-line link destinations.
-/// Code contents stay literal. No YAML, references or container parsing.
+/// Removes top-level fence markers and single-line link destinations; code stays literal.
 pub fn strip(source: &str) -> String {
     static INLINE: OnceLock<Regex> = OnceLock::new();
     let inline = INLINE.get_or_init(|| Regex::new(

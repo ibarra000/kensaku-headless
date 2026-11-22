@@ -1,13 +1,5 @@
-//! On-demand previews for files the thumbnail decoder cannot read directly.
-//!
-//! - Images: the shared 240px thumbnail path.
-//! - PDF: the first page, rendered by `pdftoppm` (poppler) when it is installed.
-//!
-//! Previews are generated only when a card is shown, cached as 240px JPEGs next
-//! to the image thumbnails, and reused until the source file changes. External
-//! tools are optional: when a tool is missing the file keeps its type icon.
-//! Renders run with a timeout and a small concurrency limit, so a grid full of
-//! PDFs cannot start dozens of processes at once.
+//! On-demand, cached 480px JPEG previews (images, PDF first page via `pdftoppm`);
+//! external renders are time-limited and concurrency-capped.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,7 +10,6 @@ use std::time::{Duration, Instant};
 const RENDER_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CONCURRENT_RENDERS: usize = 2;
 
-/// Counting semaphore for external renders.
 struct Slots {
     used: Mutex<usize>,
     free: Condvar,
@@ -59,7 +50,7 @@ pub enum Kind {
     Pdf,
 }
 
-/// Classifies a file by extension. `None` means it has no preview.
+/// `None` means no preview.
 pub fn kind_for(filename: &str) -> Option<Kind> {
     let ext = filename.rsplit('.').next().filter(|_| filename.contains('.'))?;
     match ext.to_ascii_lowercase().as_str() {
@@ -69,13 +60,12 @@ pub fn kind_for(filename: &str) -> Option<Kind> {
     }
 }
 
-/// Returns a 480px JPEG preview for `source`, generating it if needed.
 pub fn preview_jpeg(source: &Path, out_dir: &Path) -> Result<PathBuf, String> {
     let name = source
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "file has no name".to_string())?;
-    // A grid of results must not download every cloud-only file it shows.
+    // Never trigger a download of cloud-only files.
     if crate::indexer::walker::is_cloud_placeholder_path(source) {
         return Err(format!("{} is only in the cloud", name));
     }
@@ -115,8 +105,7 @@ fn render_external(source: &Path, out_dir: &Path, kind: Kind) -> Result<PathBuf,
         Kind::Image => return Err("images use the thumbnail path".into()),
     };
 
-    // Render to a temp file, then move it into place so readers never see a
-    // half-written JPEG.
+    // Temp file + rename so readers never see a half-written JPEG.
     let work = out_dir.join(format!(
         ".render-{}-{}",
         std::process::id(),
@@ -130,11 +119,7 @@ fn render_external(source: &Path, out_dir: &Path, kind: Kind) -> Result<PathBuf,
         Kind::Pdf => {
             let mut cmd = Command::new(tool);
             cmd.args(["-jpeg", "-r", "110", "-f", "1", "-l", "1", "-singlefile"]);
-            // On macOS, pdftoppm reads the PDF from stdin (`-`). Passing the
-            // original path makes the child process (a separate binary) touch
-            // the protected folder itself, which re-triggers a TCC permission
-            // prompt per file. Other platforms have no per-process grant and
-            // keep the path, so their behaviour is unchanged.
+            // macOS: pipe via stdin so the child binary doesn't re-trigger a TCC prompt per file.
             let stdin_data = if cfg!(target_os = "macos") {
                 match std::fs::read(source) {
                     Ok(bytes) => {
@@ -170,12 +155,8 @@ fn render_external(source: &Path, out_dir: &Path, kind: Kind) -> Result<PathBuf,
     result
 }
 
-/// Runs a command with a hard timeout. Returns true on a zero exit status.
-///
-/// When `stdin_data` is `Some`, the bytes are written to the child's stdin in a
-/// background thread so the (possibly large) input cannot deadlock the pipe.
+/// Runs with a hard timeout; true on zero exit. Stdin is fed from a thread to avoid pipe deadlock.
 fn run_timed(cmd: &mut Command, stdin_data: Option<Vec<u8>>) -> bool {
-    // Hide console windows on Windows (pdftoppm is a console app).
     crate::util::process::hide_console(cmd);
     let cmd = cmd.stdin(if stdin_data.is_some() {
         Stdio::piped()
@@ -207,8 +188,7 @@ fn run_timed(cmd: &mut Command, stdin_data: Option<Vec<u8>>) -> bool {
     }
 }
 
-/// Finds an executable on PATH, plus the usual Homebrew and system locations
-/// so a Mac launched from the Finder still sees a Homebrew install.
+/// PATH plus Homebrew/system locations (Finder-launched apps lack Homebrew PATH).
 fn find_tool(name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())

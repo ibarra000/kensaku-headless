@@ -1,22 +1,12 @@
-//! Start-at-login registration for the daemon.
-//!
-//! - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no UAC).
-//! - Linux: a systemd user unit, `~/.config/systemd/user/kensaku.service`.
-//! - macOS: a LaunchAgent, `~/Library/LaunchAgents/dev.kensaku.daemon.plist`
-//!   (takes effect at the next login).
-//!
-//! The registered command runs the daemon for the current `KENSAKU_DATA_DIR`
-//! (when one is set): `daemon run` under systemd/launchd, `daemon start` on
-//! Windows.
+//! Start-at-login registration: HKCU Run key (Windows), systemd user unit (Linux), LaunchAgent (macOS).
+//! Honors the current `KENSAKU_DATA_DIR`.
 
 use std::path::{Path, PathBuf};
 
-/// Where the registration lives, for display.
 pub fn location() -> String {
     imp::location()
 }
 
-/// Registers the daemon to start at login.
 pub fn install() -> Result<String, String> {
     let exe = super::kensaku_binary().ok_or("could not find the `kensaku` binary")?;
     if cfg!(debug_assertions) {
@@ -27,12 +17,11 @@ pub fn install() -> Result<String, String> {
     Ok(location())
 }
 
-/// Removes the start-at-login registration. Missing registrations are fine.
+/// Removes the registration; a missing one is fine.
 pub fn uninstall() -> Result<(), String> {
     imp::uninstall()
 }
 
-/// Whether a registration exists.
 pub fn is_installed() -> bool {
     imp::is_installed()
 }
@@ -53,8 +42,7 @@ mod imp {
     use std::process::Command;
 
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    /// Distinct from the old desktop app's `Kensaku` value so the two never
-    /// overwrite or report each other.
+    /// Distinct from the legacy `Kensaku` Run value so the two never collide.
     const VALUE_NAME: &str = "KensakuDaemon";
 
     pub fn location() -> String {
@@ -67,17 +55,13 @@ mod imp {
         Command::new(PathBuf::from(root).join("System32").join("reg.exe"))
     }
 
-    /// Quotes a path for the Run command line. A trailing backslash would
-    /// escape the closing quote, so it is dropped (these are canonical paths).
+    /// Quotes a path for the Run key; a trailing backslash is dropped so it can't escape the quote.
     pub(super) fn quoted(path: &Path) -> String {
         format!("\"{}\"", path.display().to_string().trim_end_matches('\\'))
     }
 
     pub fn install(exe: &Path, data_dir: Option<&Path>) -> Result<(), String> {
-        // `kensaku` is a console binary: `daemon run` here would keep a
-        // console window open all session. `daemon start` spawns the detached
-        // daemon and exits. The Run key has no environment field, so the data
-        // dir travels as a flag.
+        // `daemon start` (not `run`) avoids a session-long console window; Run has no env, so pass the data dir as a flag.
         let value = match data_dir {
             Some(dir) => format!("{} --data-dir {} daemon start", quoted(exe), quoted(dir)),
             None => format!("{} daemon start", quoted(exe)),
@@ -119,8 +103,7 @@ mod imp {
         unit_path().display().to_string()
     }
 
-    /// Double-quoted systemd value: escapes `\`, `"`, `%` specifiers and,
-    /// for `ExecStart`, `$` expansion.
+    /// Double-quoted systemd value: escapes `\`, `"`, `%` and, for `ExecStart`, `$`.
     pub(super) fn systemd_quote(value: &str, exec: bool) -> Result<String, String> {
         if value.contains('\n') {
             return Err(format!("path contains a newline: {value:?}"));

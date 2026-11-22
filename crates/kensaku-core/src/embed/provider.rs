@@ -1,14 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-/// Identifies the embedding engine provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingProviderKind {
-    /// Potion-base-8M static lookup table (or deterministic hashing fallback).
+    /// Potion-base-8M static table (or hashing fallback).
     Static,
-    /// Downloaded ONNX model pack (e.g. bge-small or SigLIP).
+    /// Downloaded ONNX model pack.
     Smart,
-    /// Lexical only; no semantic vectors.
+    /// Lexical only.
     None,
 }
 

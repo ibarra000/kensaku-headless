@@ -1,10 +1,4 @@
-//! K2 metadata memory probe.
-//!
-//! Usage: `cargo run --release --example mem_probe -- <entries>`
-//!
-//! Builds a synthetic metadata tree with one root, one directory per 1,000
-//! files, and `<entries>` files. No database is used. Reports RSS before and
-//! after, plus the cost of the hot structures and a 100,000-entry path lookup.
+//! Metadata memory probe over a synthetic tree (no DB): `cargo run --release --example mem_probe -- <entries>`.
 
 use kensaku_core::indexer::arena::Node;
 use kensaku_core::indexer::metadata::MetadataStore;
@@ -124,8 +118,7 @@ fn main() {
         use kensaku_core::search::SearchDispatcher;
         use kensaku_core::search::fuzzy::FuzzySearcher;
 
-        // Isolate the fuzzy filename tier from the per-query metadata
-        // materialization that currently precedes it.
+        // Time the fuzzy tier separately from per-query metadata materialization.
         let started = Instant::now();
         let entries: Vec<FileEntry> = (0..store.len())
             .map(|idx| store.materialize(idx as u32))
@@ -154,8 +147,6 @@ fn main() {
 
         let no_content: Option<kensaku_core::indexer::content::ContentIndex> = None;
         for query in ["f0000001", "file0000001", "zzzz"] {
-            // Warm up, then take five samples (this is a shape check, not a
-            // tight microbenchmark).
             let _ = SearchDispatcher::search_response_fast(
                 query,
                 &store,

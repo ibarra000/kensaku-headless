@@ -30,9 +30,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Push callback for indexing progress (replaces the old UI event emission).
+/// Push callback for indexing progress.
 pub type StatusListener = Arc<dyn Fn(&IndexingStatus) + Send + Sync>;
-/// Shared, swappable slot holding the optional status listener.
 pub type StatusSink = Arc<RwLock<Option<StatusListener>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,16 +79,8 @@ fn now_unix_secs() -> u64 {
 }
 
 /// True when an existing entry is unchanged and has no content re-read pending.
-///
-/// A pending entry (set by an OCR toggle) is always re-processed even when its
-/// mtime and size still match, which is how the image re-scan stays targeted.
 fn is_unchanged(existing: &FileEntry, entry: &FileEntry) -> bool {
-    // (0, 0) is the walker's "I could not stat this" sentinel, not a file
-    // state: a Windows file locked by another process, or one being scanned by
-    // antivirus, fails `metadata()` for that moment. Treating it as a change
-    // did two harmful things — it re-read the file, and it *stored* 0/0 as the
-    // file's size and modification time, so the next scan saw different values
-    // and re-read it again. One transient lock produced churn across launches.
+    // (0, 0) is the walker's "could not stat" sentinel (e.g. a locked file), not a change.
     if entry.size == 0 && entry.modified == 0 {
         return true;
     }
@@ -104,12 +95,11 @@ struct ExtractJob {
     modified: u64,
     size: u64,
     is_image: bool,
-    /// The pixels changed (or the row is new), so any stored dHash is stale.
+    /// Pixels changed (or row is new), so any stored dHash is stale.
     phash_needs_refresh: bool,
 }
 
-/// Whether a finished crawl should record the first scan as done. A cancelled
-/// crawl never does, so the setup wizard returns to folder selection.
+/// A cancelled crawl never marks the first scan done, so setup returns to folder selection.
 fn marks_first_scan_done(is_setup_complete: bool, first_scan_done: bool, cancelled: bool) -> bool {
     is_setup_complete && !first_scan_done && !cancelled
 }
@@ -119,12 +109,7 @@ fn extract_sort_key(job: &ExtractJob) -> (bool, Reverse<u64>, u64) {
     (job.is_image, Reverse(job.modified), job.size)
 }
 
-/// A file that has been extracted, together with any semantic vectors.
-///
-/// Passed from the extraction workers to the single index-committing thread
-/// through a bounded channel. The bound is what keeps peak memory flat: text is
-/// dropped as soon as it has been written to the lexical and semantic indexes
-/// instead of every document's text accumulating in a `Vec` until the end.
+/// An extracted file plus its semantic vectors, sent over a bounded channel to keep memory flat.
 struct ExtractedWork {
     node_id: u64,
     path: PathBuf,
@@ -138,17 +123,12 @@ struct ExtractedWork {
     image_sig: Option<Vec<u8>>,
     /// Opportunistic hash from an already-fresh cached thumbnail.
     image_phash: Option<u64>,
-    /// Whether a missing opportunistic hash must invalidate the stored dHash.
     phash_needs_refresh: bool,
-    /// Extraction did not finish (timeout, busy, OCR not runnable yet): keep
-    /// the file pending and try again next crawl.
+    /// Extraction did not finish (timeout, busy, OCR unavailable); retry next crawl.
     retry: bool,
 }
 
-/// How many crawls a file may fail extraction on before it is left alone
-/// until it changes. Timeouts and slot saturation are usually persistent for
-/// a given file (a huge scan, a locked network file), so an unbounded retry
-/// just repeats the same cost on every launch.
+/// Crawls a file may fail extraction on before it is left alone until it changes.
 const MAX_EXTRACTION_ATTEMPTS: u32 = 3;
 
 fn fnv_hash(data: &str) -> u64 {
@@ -160,16 +140,9 @@ fn fnv_hash(data: &str) -> u64 {
     h
 }
 
-/// True while a perceptual-hash backfill thread is running.
 static PHASH_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Computes perceptual hashes for images the crawl deliberately skipped.
-///
-/// Full-image decoding is the slowest and most memory-hungry part of image
-/// handling, and the hash is only used by the `/dupes` view — it must never
-/// gate OCR or the search index. This worker decodes one image at a time,
-/// pauses during crawls and while a query is in flight, and lets hashes appear
-/// progressively in duplicate grouping.
+/// Computes perceptual hashes the crawl skipped, one image at a time, pausing for crawls and queries.
 fn start_phash_backfill(
     metadata: Arc<RwLock<MetadataStore>>,
     content_index: Arc<RwLock<Option<ContentIndex>>>,
@@ -239,16 +212,13 @@ fn start_phash_backfill(
                     }
 
                     crate::util::memory::release_memory();
-                    // One decode at a time, with a small yield between images so
-                    // typing stays responsive.
+                    // One decode at a time, with a yield so typing stays responsive.
                     thread::sleep(std::time::Duration::from_millis(20));
                 }
                 continue;
             }
 
-            // Hashes are complete. Now assign bursts to old rows in small
-            // batches. Text comes from the committed content index, so this
-            // also works for images indexed before burst grouping existed.
+            // Hashes are complete; assign bursts to old rows in small batches.
             let paths = match db.image_paths_missing_burst(50) {
                 Ok(paths) => paths,
                 Err(_) => return,
@@ -284,15 +254,6 @@ fn start_phash_backfill(
 }
 
 /// Releases the crawl gate and resets the visible status if the crawl panics.
-///
-/// A panic anywhere in a crawl (an extractor, a rayon scope, an embedding
-/// call) used to leave the gate set for the rest of the process lifetime:
-/// every later crawl and rebuild returned immediately, the index never
-/// updated again, and nothing was logged. The gate half is fixed here; the
-/// status half matters just as much, because the phase is written before the
-/// long-running work starts. Without the reset, a panic leaves the GUI and the
-/// daemon `health` RPC reporting `extracting` at 0/N forever with no thread
-/// behind it. The normal path releases both explicitly and disarms the guard.
 struct CrawlGateGuard {
     gate: Arc<AtomicBool>,
     status: Arc<RwLock<IndexingStatus>>,
@@ -324,8 +285,7 @@ impl Drop for CrawlGateGuard {
         if !thread::panicking() {
             return;
         }
-        // `parking_lot::RwLock` does not poison, so this cannot panic inside
-        // an unwinding thread (which would abort the process).
+        // `parking_lot::RwLock` does not poison, so this cannot panic while unwinding.
         let mut st = self.status.write();
         st.is_indexing = false;
         st.paused = false;
@@ -348,14 +308,13 @@ pub struct IndexerManager {
     pub query_in_flight: Arc<AtomicBool>,
     pub config: Arc<RwLock<KensakuConfig>>,
     pub status: Arc<RwLock<IndexingStatus>>,
-    /// Unix timestamp (ms) when the current/last crawl started, 0 if none.
+    /// Unix ms when the current/last crawl started, 0 if none.
     pub crawl_start_unix_ms: Arc<AtomicU64>,
-    /// Unix timestamp (secs) of the last successful reconcile, 0 if never.
+    /// Unix secs of the last successful reconcile, 0 if never.
     pub last_reconcile_unix_secs: Arc<AtomicU64>,
-    /// True while a live filesystem watcher is running.
     pub watcher_ok: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
-    /// Set to ask the running crawl to stop early. Cleared when a crawl starts.
+    /// Asks the running crawl to stop early; cleared when a crawl starts.
     cancel_requested: Arc<AtomicBool>,
     /// A `start_indexing_when_idle` waiter is already queued.
     crawl_pending: Arc<AtomicBool>,
@@ -366,7 +325,6 @@ pub struct IndexerManager {
 impl IndexerManager {
     pub fn new(config: KensakuConfig) -> Self {
         crate::util::priority::set_mode(config.crawl_mode);
-        // Apply the opt-in external extractor registry before any crawl starts.
         crate::indexer::extract::set_external_extractors(config.extractors.clone());
         crate::indexer::extract::set_path_modes(&config.watched_dirs, &config.name_only_dirs);
         crate::indexer::extract::image::set_ocr_max_image_bytes(config.ocr_max_image_bytes);
@@ -390,14 +348,10 @@ impl IndexerManager {
         )));
         let query_in_flight = Arc::new(AtomicBool::new(false));
 
-        // Semantic state (the ~30 MB embedding table and the persisted unit
-        // vectors) is only loaded when semantic search is actually enabled.
-        // With it off the indexer stays a plain lexical index and keeps that
-        // memory free.
+        // The embedding table is only loaded when semantic search is enabled.
         let semantic_enabled = config.semantic_enabled;
 
-        // Discard semantic units produced by a different embedding model; the
-        // embedding worker re-queues every node once it starts.
+        // Discard units from a different embedding model; the worker re-queues every node.
         if semantic_enabled && let Some(db) = metadata_store.read().db() {
             let expected_model_id = ModelRegistry::global().model_id;
             match db.units_model_id() {
@@ -423,9 +377,7 @@ impl IndexerManager {
             }
         }
 
-        // Load persisted units from database. These are required for semantic
-        // search even if the user toggles the tier on later in this session, so
-        // they are always restored; only the embedding table is lazy.
+        // Units are always restored (the tier can be enabled later); only the embedding table is lazy.
         let mut units_count = 0;
         if let Some(db) = metadata_store.read().db() {
             let mut store = unit_store.write();
@@ -488,9 +440,7 @@ impl IndexerManager {
         }
     }
 
-    /// Read-only handle used by GUI clients that talk to a daemon. It loads the
-    /// persisted metadata and Tantivy index without taking a writer lock or
-    /// starting a watcher, so it can coexist with the daemon.
+    /// Read-only handle: no writer lock or watcher, so it can coexist with a daemon.
     pub fn new_readonly(config: KensakuConfig) -> Self {
         crate::indexer::extract::set_external_extractors(config.extractors.clone());
         crate::indexer::extract::set_path_modes(&config.watched_dirs, &config.name_only_dirs);
@@ -550,11 +500,7 @@ impl IndexerManager {
         }
     }
 
-    /// Registers a callback that receives every `IndexingStatus` update.
-    ///
-    /// Status is always mirrored into the shared `RwLock` first, so pollers
-    /// (daemon `get_status`, CLI `status`) see it regardless; the listener is
-    /// for push consumers such as streaming subscribers.
+    /// Registers a push callback for every `IndexingStatus` update (pollers read the shared lock).
     pub fn set_status_listener(&self, listener: StatusListener) {
         *self.status_sink.write() = Some(listener);
     }
@@ -565,10 +511,7 @@ impl IndexerManager {
         }
     }
 
-    /// Blocks extraction workers while the user has paused indexing.
-    ///
-    /// The watcher is a separate thread and keeps applying renames/deletes, so
-    /// pausing never makes the index stale about files that disappeared.
+    /// Blocks extraction workers while paused; the watcher keeps applying renames/deletes.
     fn wait_while_paused(
         config: &Arc<RwLock<KensakuConfig>>,
         status: &Arc<RwLock<IndexingStatus>>,
@@ -599,29 +542,17 @@ impl IndexerManager {
         }
     }
 
-    /// Holds extraction while the user is searching.
-    ///
-    /// A crawl uses every core it can, and a search that arrives mid-crawl
-    /// competes with 2-8 extraction threads for them, which is why the app
-    /// felt worst exactly when it was doing the most work. The phash backfill
-    /// already yields this way; the extraction pool did not.
-    ///
-    /// Polling rather than blocking on a condition variable: a flag left set
-    /// by a panic in the query path costs a slower crawl, never a hung one.
+    /// Holds extraction while a search is in flight. Polls so a stuck flag slows, never hangs, the crawl.
     fn yield_to_queries(query_in_flight: &Arc<AtomicBool>) {
         if !query_in_flight.load(Ordering::Relaxed) {
             return;
         }
-        // Long enough for the query to finish, short enough that the crawl
-        // resumes immediately after it.
         while query_in_flight.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(25));
         }
     }
 
-    /// Eco mode limits how often extraction jobs start while on battery.
-    /// Documents already in flight finish normally; fresh watcher events are
-    /// handled by the watcher thread and are not paced.
+    /// Eco mode: limits how often extraction jobs start while on battery.
     fn pace_on_battery(
         config: &Arc<RwLock<KensakuConfig>>,
         battery: &Mutex<(Instant, bool)>,
@@ -649,11 +580,7 @@ impl IndexerManager {
     }
 
     pub fn start_indexing(&self) {
-        // Never crawl before the setup wizard has run: a fresh or corrupt
-        // config falls back to the default roots (the home directory), and
-        // scanning/watching those before the user has chosen their folders
-        // is exactly the wrong behavior (it once went through `~\AppData`
-        // and network/MTP devices on Windows).
+        // Never crawl before setup: the default roots (home directory) are the wrong thing to scan.
         if !self.config.read().is_setup_complete {
             return;
         }
@@ -667,24 +594,16 @@ impl IndexerManager {
             return;
         }
         if self.is_running.swap(true, Ordering::SeqCst) {
-            // Already running
             return;
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
 
-        // Stop any watcher left over from a previous indexing run so we never
-        // end up with duplicate watchers on the same directories.
+        // Stop any previous watcher so directories are never watched twice.
         let previous_watcher = self.watcher_handle.lock().take();
         if let Some(mut handle) = previous_watcher {
             handle.stop();
         }
         self.watcher_ok.store(false, Ordering::SeqCst);
-
-        // The crawl embeds newly extracted text inline, so a background
-        // embedding worker from a previous run must not also pick up the same
-        // nodes (it would re-read every file and duplicate units). It is
-        // stopped inside the crawl thread so the IPC call returns immediately,
-        // and restarted at the end for incremental work.
 
         let metadata = Arc::clone(&self.metadata);
         let content_index = Arc::clone(&self.content_index);
@@ -709,16 +628,10 @@ impl IndexerManager {
                 Arc::clone(&status_sink),
             );
 
-            // Apply OCR engine selection and record whether it re-queued
-            // images: that is one of the reasons a crawl re-reads files, and
-            // the report below has to say why.
-            // Captured before the sync writes the new value: a report that
-            // re-reads the file afterwards always shows "no change".
+            // Capture the OCR signature before the sync rewrites it, for the crawl report.
             let ocr_signature_before = read_ocr_signature();
             let ocr_queued = Self::sync_ocr_state(&config_arc, &metadata);
-            // Reconcile name-only directories before the walk, so files that
-            // left name-only mode are flagged pending in time for the
-            // incremental check below.
+            // Reconcile name-only dirs before the walk so files leaving that mode are flagged pending.
             let name_only_queued = Self::sync_name_only_state(
                 &config_arc,
                 &metadata,
@@ -746,15 +659,13 @@ impl IndexerManager {
                 )
             };
 
-            // Balanced/eco keep the crawl thread in the OS idle class; full
-            // leaves it at normal priority. Failures are advisory.
+            // Balanced/eco run the crawl at idle priority; failures are advisory.
             crate::util::priority::apply(crawl_mode);
 
             crawl_start_unix_ms.store(now_unix_ms(), Ordering::Relaxed);
             watcher_ok.store(false, Ordering::Relaxed);
 
-            // After the first full scan, walking an unchanged tree is silent:
-            // the banner appears only once there is something to read.
+            // After the first scan, walking an unchanged tree shows no banner.
             let mut quiet = config_arc.read().first_scan_done;
             if quiet {
                 status.write().paused = false;
@@ -767,11 +678,7 @@ impl IndexerManager {
                 Self::emit_status(&status_sink, &st);
             }
 
-            // Stop a background embedding worker from a previous run before the
-            // crawl starts writing. This runs here (not on the IPC thread) so a
-            // long embedding batch cannot block the caller. The crawl embeds
-            // newly extracted text inline; the worker is restarted afterwards
-            // for incremental work.
+            // Stop a previous embedding worker here (not on the IPC thread); restarted after the crawl.
             if let Some(mut queue) = embedding_queue.lock().take() {
                 queue.stop();
             }
@@ -783,24 +690,20 @@ impl IndexerManager {
 
             let mut files_count: usize = 0;
             let mut content_count = 0;
-            // Why files were re-read, counted rather than guessed. A launch
-            // that re-reads thousands of unchanged files is only diagnosable
-            // if the crawl can say which bucket they fell into.
+            // Re-read reasons, counted for the crawl report.
             let mut new_files = 0usize;
             let mut restamped_files = 0usize;
             let mut pending_files = 0usize;
             let mut pending_commits = 0;
             let mut crawled_paths: HashSet<PathBuf> = HashSet::new();
-            // Images flagged by an OCR-toggle re-scan that were processed by
-            // this crawl. Their pending flag is cleared once extraction ran.
+            // OCR-toggle images processed by this crawl; their pending flag is cleared afterwards.
             let mut pending_images: HashSet<PathBuf> = HashSet::new();
 
-            // Begin SQLite transaction for batched writes (100x faster than per-file commits)
             if let Some(db) = metadata.read().db() {
                 let _ = db.begin_transaction();
             }
 
-            // Phase 1: Collect all entries (jwalk is already parallel internally).
+            // Phase 1: collect all entries.
             let all_entries = walk_directories_until(
                 &watched_dirs,
                 &excluded_dirs,
@@ -817,8 +720,7 @@ impl IndexerManager {
                 Self::emit_status(&status_sink, &st);
             }
 
-            // Phase 2a: Filter excluded extensions, check incremental, add metadata.
-            // Collect indexable files for parallel content extraction.
+            // Phase 2a: filter, incremental check, metadata; collect files to extract.
             let mut to_extract: Vec<ExtractJob> = Vec::new();
 
             for entry in all_entries {
@@ -827,12 +729,7 @@ impl IndexerManager {
                 }
                 files_count += 1;
 
-                // Skip files whose extension is in the excluded list.
-                //
-                // The path is deliberately NOT marked as crawled: marking it
-                // meant a file indexed before its extension was excluded was
-                // never re-read and never removed, so the exclusion only ever
-                // applied to files that did not exist yet.
+                // Excluded extensions are not marked crawled, so previously indexed ones get swept.
                 if !entry.is_dir
                     && let Some(ext) = entry.extension
                     && excluded_exts.iter().any(|e| e.eq_ignore_ascii_case(ext))
@@ -842,10 +739,7 @@ impl IndexerManager {
 
                 crawled_paths.insert(entry.path.clone());
 
-                // Incremental crawl: a cheap read-lock check first, so an
-                // unchanged tree never contends on the write lock or touches
-                // SQLite. A pending entry is re-processed even when mtime/size
-                // match so an OCR toggle only re-scans images.
+                // Read-lock check first so an unchanged tree never takes the write lock.
                 let previous = { metadata.read().get(&entry.path) };
                 let unchanged = previous
                     .as_ref()
@@ -876,10 +770,7 @@ impl IndexerManager {
                     pending_images.insert(entry.path.clone());
                 }
 
-                // Name-only directories keep their metadata but never reach
-                // extraction. A pending flag (OCR toggle, cap change, a
-                // directory leaving name-only mode) is cleared here, or the
-                // file would be retried on every crawl for nothing.
+                // Name-only: keep metadata, skip extraction, clear any pending flag so it is not retried forever.
                 if !entry.is_dir && crate::indexer::extract::is_name_only_path(&entry.path) {
                     if was_pending {
                         metadata.write().clear_content_pending(&entry.path);
@@ -895,18 +786,14 @@ impl IndexerManager {
                     continue;
                 }
 
-                // Queue indexable files for parallel content extraction.
-                // Cloud placeholders stay metadata-only so indexing does not
-                // hydrate (download) them.
+                // Cloud placeholders stay metadata-only so indexing does not hydrate them.
                 if !entry.is_dir
                     && (is_indexable_extension(entry.extension)
                         || is_indexable_file_name(&entry.name)
                         || crate::indexer::extract::external::handles(&entry.path))
                     && !is_cloud_placeholder_path(&entry.path)
                 {
-                    // Pending until extraction finishes, so a crawl that is
-                    // killed after a mid-crawl commit leaves these files to be
-                    // read next launch instead of looking up to date.
+                    // Pending until extracted, so a crawl killed mid-way re-reads these next launch.
                     metadata.write().set_content_pending(&entry.path);
                     to_extract.push(ExtractJob {
                         node_id,
@@ -930,28 +817,16 @@ impl IndexerManager {
                 }
             }
 
-            // Index text and small files first. Images (OCR) are the slow tail,
-            // so this makes the lexical index useful earlier in the crawl while
-            // the same total amount of work is done. Within each class, newest
-            // files win so a just-saved document is searchable first.
+            // Text before images (OCR is the slow tail), newest first within each class.
             to_extract.sort_unstable_by_key(extract_sort_key);
 
-            // Phase 2b: streaming extraction → lexical index → semantic index.
-            //
-            // Previously every extracted document was collected into a Vec and
-            // indexed afterwards, and the semantic worker then re-read and
-            // re-extracted every file (re-running OCR). The pipeline below
-            // extracts each file exactly once and hands it to both indexes
-            // through a bounded channel, so peak memory stays flat and images
-            // are OCR'd once instead of twice.
+            // Phase 2b: streaming extraction -> lexical index -> semantic index, each file read once.
             let extract_total = to_extract.len();
             if extract_total > 0 {
                 quiet = false;
             }
             if !quiet {
-                // Log the dispatch parameters once. "extracting, 0/N, 0% CPU"
-                // is ambiguous between "never dispatched" and "worker blocked",
-                // and the two need different fixes.
+                // Logged once: "0/N, 0% CPU" is ambiguous between never dispatched and blocked.
                 crate::say!(
                     "[Kensaku Indexer] extraction: {} file(s) queued, {} worker(s), {} CPU(s) available",
                     extract_total,
@@ -977,10 +852,7 @@ impl IndexerManager {
             let model = semantic_enabled.then(|| ModelRegistry::global().clone());
             let embed_model_id = model.as_ref().map(|m| m.model_id);
 
-            // Drop semantic units for every file about to be re-extracted. New
-            // files have none, so a first scan does no work here. One batched
-            // pass (instead of per-file vector compaction) keeps re-indexing a
-            // large tree linear.
+            // Drop semantic units for files about to be re-extracted, in one batched pass.
             if semantic_enabled && !to_extract.is_empty() {
                 let ids: HashSet<u64> = to_extract
                     .iter()
@@ -1002,20 +874,15 @@ impl IndexerManager {
 
             let extract_done = AtomicUsize::new(0);
             let mut extracted_paths: HashSet<PathBuf> = HashSet::new();
-            // Files whose extraction did not finish this crawl. They keep (or
-            // gain) the pending flag so the next crawl retries them; before,
-            // a timed-out or OCR-less image was recorded as "no text" forever.
+            // Files whose extraction did not finish; they stay pending for the next crawl.
             let mut retry_paths: HashSet<PathBuf> = HashSet::new();
             let mut units_added = 0usize;
 
-            // Bounded handoff: at most 32 extracted documents (and their
-            // vectors) are in flight at any moment.
+            // Bounded handoff: at most 32 extracted documents in flight.
             let (tx, rx) = std::sync::mpsc::sync_channel::<ExtractedWork>(32);
             let image_db = metadata.read().db();
             let db_handle = metadata.read().db();
             let thumbs_dir = KensakuConfig::config_dir().join("thumbs");
-            // The producer task runs on the rayon pool and must own its handles;
-            // the consumer (this thread) keeps using the originals.
             let producer_status = Arc::clone(&status);
             let producer_app = Arc::clone(&status_sink);
             let producer_config = Arc::clone(&config_arc);
@@ -1024,15 +891,8 @@ impl IndexerManager {
             let pace_gate = Arc::new(Mutex::new(Instant::now()));
             let producer_query_flag = Arc::clone(&query_in_flight);
 
-            // The producer must NOT run as a `rayon::scope` task here. With a
-            // one-thread global pool (a cgroup `CPUQuota=100%`, a single-core
-            // box, `RAYON_NUM_THREADS=1`) `scope` executes its body on the only
-            // worker: the consumer below blocks on `rx`, so the spawned
-            // producer is still queued on that same worker and never runs.
-            // That is the headless-daemon stall: phase "extracting" at 0/N,
-            // zero CPU, forever. A plain scoped thread keeps one thread for
-            // the producer and one for the consumer regardless of pool size;
-            // the parallel extraction inside still uses the global pool.
+            // Not `rayon::scope`: with a one-thread pool the producer would queue behind the
+            // blocked consumer and never run. A scoped thread works regardless of pool size.
             std::thread::scope(|scope| {
                 use rayon::prelude::*;
 
@@ -1042,16 +902,11 @@ impl IndexerManager {
                             return;
                         }
                         Self::wait_while_paused(&producer_config, &producer_status, &producer_app);
-                        // Search comes first: a user waiting on results must not
-                        // queue behind a background scan.
+                        // Search first: a waiting user must not queue behind a scan.
                         Self::yield_to_queries(&producer_query_flag);
                         Self::pace_on_battery(&producer_config, &battery_state, &pace_gate);
 
-                        // Image dimensions come from the file header, which is
-                        // cheap. Perceptual hashing needs a full decode; doing
-                        // it here would serialize the whole crawl behind a
-                        // handful of decode slots and starve OCR. The hash is
-                        // filled in later by the background backfill.
+                        // Dimensions only; perceptual hashing (full decode) is left to the backfill.
                         if job.is_image
                             && let Some((width, height)) =
                                 crate::indexer::extract::image::dimensions(&job.path)
@@ -1060,9 +915,7 @@ impl IndexerManager {
                             let _ = db.set_image_dimensions(&job.path, width, height);
                         }
 
-                        // The configured text cap (`content_max_text_bytes`),
-                        // not a fixed 1 MB: a hard-coded limit here made the
-                        // "deep" content setting unable to go past 1 MB.
+                        // Use the configured text cap, not a fixed limit.
                         let (content, retry) = read_text_content_checked(
                             &job.path,
                             crate::indexer::extract::content_max_text_bytes() as u64,
@@ -1082,9 +935,7 @@ impl IndexerManager {
                             None
                         };
 
-                        // Embed here, in parallel with extraction and lexical
-                        // indexing. The vectors travel with the text so the
-                        // semantic tier never has to touch the file again.
+                        // Embed here so the semantic tier never touches the file again.
                         let (units, content_hash) = match (model.as_ref(), content.as_deref()) {
                             (Some(model), Some(text)) if !text.trim().is_empty() => {
                                 let chunks = chunk_text(text, job.size as usize);
@@ -1100,10 +951,7 @@ impl IndexerManager {
                         };
 
                         let done = extract_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Report the first completion too: with fewer than five
-                        // files the old condition kept the UI and the daemon
-                        // `health` RPC at "0/N" until the whole batch finished,
-                        // which reads as a stall even when extraction is fine.
+                        // Report the first completion too, or small batches look stalled at 0/N.
                         if done == 1 || done.is_multiple_of(5) || done == extract_total {
                             let mut st = producer_status.write();
                             st.extract_done = done;
@@ -1112,8 +960,7 @@ impl IndexerManager {
                             Self::emit_status(&producer_app, &st);
                         }
 
-                        // Consumer may be gone only if the crawl is shutting
-                        // down; dropping the work is safe in that case.
+                        // The consumer is only gone during shutdown; dropping is safe.
                         let _ = tx.send(ExtractedWork {
                             node_id: job.node_id,
                             path: job.path.clone(),
@@ -1149,9 +996,7 @@ impl IndexerManager {
                         content_count += 1;
                         pending_commits += 1;
 
-                        // Publish live counts instead of waiting for a commit
-                        // boundary, otherwise the UI reports 0 documents while
-                        // extraction is still running.
+                        // Publish live counts rather than waiting for a commit.
                         if content_count.is_multiple_of(64) {
                             let mut st = status.write();
                             st.files_indexed = files_count;
@@ -1185,8 +1030,7 @@ impl IndexerManager {
                                 }
                                 metadata.write().clear_burst_for_path(&work.path);
                             } else {
-                                // Pending OCR: the pixels did not change, so
-                                // keep the existing dHash for this re-assignment.
+                                // Pending OCR: pixels unchanged, keep the existing dHash.
                                 match db.assign_burst_for_path(&work.path) {
                                     Ok(updates) if !updates.is_empty() => {
                                         metadata.write().apply_bursts(&updates);
@@ -1236,8 +1080,7 @@ impl IndexerManager {
                         );
                     }
 
-                    // Done reading this file; a retry keeps (re-sets) the flag
-                    // after the loop. Pending images are cleared further down.
+                    // A retry re-sets the flag after the loop; pending images are cleared below.
                     if !work.retry && !pending_images.contains(&work.path) {
                         metadata.write().clear_content_pending(&work.path);
                     }
@@ -1245,8 +1088,7 @@ impl IndexerManager {
                     if pending_commits >= 512
                         && let Some(c_index) = c_index
                     {
-                        // Search index first: a crash between the two leaves
-                        // files pending (re-read), never indexed-but-forgotten.
+                        // Search index first: a crash leaves files pending, never indexed-but-forgotten.
                         let _ = c_index.commit();
                         if let Some(db) = db_handle.as_ref()
                             && let Err(e) = db.commit_and_reopen()
@@ -1274,13 +1116,8 @@ impl IndexerManager {
                 Self::emit_status(&status_sink, &st);
             }
 
-            // A pending image re-scanned by this crawl is done. When extraction
-            // produced nothing because OCR is off, drop any stale OCR document
-            // so search stops returning it. Paths skipped by exclusions never
-            // enter `pending_images`, so their flag is kept.
-            //
-            // Incomplete reads are the exception: their old text stays (it is
-            // better than nothing) and they stay pending for the next crawl.
+            // Re-scanned pending images are done; drop stale OCR docs when OCR is off.
+            // Incomplete reads keep their old text and stay pending.
             let ocr_on = crate::indexer::extract::ocr_enabled();
             for path in &pending_images {
                 if retry_paths.contains(path) {
@@ -1294,12 +1131,7 @@ impl IndexerManager {
                 }
                 metadata.write().clear_content_pending(path);
             }
-            // Retry, but a bounded number of times. A file that always times
-            // out used to be re-read on every single launch, so the crawl never
-            // settled and launching the app meant waiting for the same
-            // expensive files again. After the cap the file is left alone
-            // until it changes on disk or OCR settings change, which is what
-            // resets the counter.
+            // Bounded retry; after the cap a file waits until it or the OCR settings change.
             let mut given_up = 0usize;
             for path in &retry_paths {
                 let keep_trying = metadata
@@ -1325,18 +1157,13 @@ impl IndexerManager {
                 );
             }
 
-            // Commit the SQLite transaction (batched writes)
             if let Some(db) = metadata.read().db() {
                 let _ = db.commit_transaction();
-                // Keep the WAL from growing across crawls. PASSIVE never
-                // blocks readers/writers, so this is safe on the crawl thread.
+                // PASSIVE checkpoint never blocks, keeping the WAL from growing across crawls.
                 db.checkpoint_passive();
             }
 
-            // A configured root that cannot be read (unplugged external drive,
-            // unmounted network share) is not "everything was deleted": keep
-            // its metadata and documents so reconnecting the drive does not
-            // require a full rebuild.
+            // Keep data for unreadable roots (unplugged drive, unmounted share).
             let unavailable_roots: Vec<PathBuf> = watched_dirs
                 .iter()
                 .filter(|root| std::fs::read_dir(root).is_err())
@@ -1357,14 +1184,7 @@ impl IndexerManager {
                 Self::emit_status(&status_sink, &st);
             }
 
-            // A directory the crawl could not read (permissions, a locked
-            // file, a network hiccup, a Windows path over MAX_PATH) is not
-            // "its contents were deleted". Only whole roots were protected, so
-            // one unreadable subfolder dropped its entire subtree from the
-            // index and recovering it needed a full re-extraction.
-            //
-            // Cached per directory: the sweep asks about every stale
-            // candidate, and a deleted tree shares one parent.
+            // An unreadable parent directory is not a deletion; cached per directory.
             let mut parent_unreadable: HashMap<PathBuf, bool> = HashMap::new();
             let mut is_protected_by_unreadable_parent = |path: &std::path::Path| -> bool {
                 let Some(parent) = path.parent() else {
@@ -1373,8 +1193,7 @@ impl IndexerManager {
                 if let Some(known) = parent_unreadable.get(parent) {
                     return *known;
                 }
-                // NotFound means the parent really is gone, so the child is
-                // really gone. Any other error means we could not look.
+                // Only NotFound means the parent is really gone.
                 let unreadable = match std::fs::read_dir(parent) {
                     Ok(_) => false,
                     Err(error) => error.kind() != std::io::ErrorKind::NotFound,
@@ -1383,9 +1202,7 @@ impl IndexerManager {
                 unreadable
             };
 
-            // Drop metadata entries for files that no longer exist on disk.
-            // A cancelled crawl did not see every file, so "not seen" does not
-            // mean "deleted": skip the sweep and let the next crawl decide.
+            // Drop entries no longer on disk, unless cancelled (not every file was seen).
             let crawl_cancelled = cancel_requested.load(Ordering::SeqCst);
             let stale_paths: Vec<PathBuf> = if crawl_cancelled {
                 Vec::new()
@@ -1406,10 +1223,7 @@ impl IndexerManager {
             };
 
             if !stale_paths.is_empty() {
-                // Drop content documents for the same paths directly. The old
-                // implementation scanned the entire content index on every
-                // crawl, which cost seconds on large corpora; the crawl already
-                // knows exactly what disappeared.
+                // Drop content docs for exactly those paths (no full index scan).
                 if let Some(c_index) = content_index.read().as_ref() {
                     let _ = c_index.remove_many(&stale_paths);
                 }
@@ -1424,29 +1238,19 @@ impl IndexerManager {
                 );
             }
 
-            // Final commit
             if let Some(c_index) = content_index.read().as_ref() {
                 let _ = c_index.commit();
             }
 
             last_reconcile_unix_secs.store(now_unix_secs(), Ordering::Relaxed);
 
-            // Record what this crawl actually did, so "indexing runs every
-            // time I open the app" can be diagnosed from the Health tab
-            // instead of guessed at. Reasons are checked in the order they are
-            // set below the crawl, widest first: a schema rebuild re-reads
-            // everything, so it explains the rest.
+            // Record what this crawl did and why; reasons are checked widest first.
             {
                 let rebuild_reason = content_index
                     .read()
                     .as_ref()
                     .and_then(|index| index.rebuild_reason.clone());
-                // Every contribution is named, not just the first one found.
-                // The old form picked the first matching branch, so a scan
-                // that re-read 93,390 of 100,102 entries reported
-                // "OCR settings changed (0 image/PDF pending)": a cause that
-                // accounted for zero files, presented as the reason for all of
-                // them. A reason nobody can check is worse than no reason.
+                // Name every contributing cause, not just the first.
                 let mut causes: Vec<String> = Vec::new();
                 if let Some(reason) = rebuild_reason {
                     causes.push(format!("content index rebuilt: {reason}"));
@@ -1467,8 +1271,7 @@ impl IndexerManager {
                         retry_paths.len().saturating_sub(given_up)
                     ));
                 }
-                // A genuine edit and an unstable measurement look identical
-                // here, so name the counts rather than asserting a cause.
+                // An edit and an unstable measurement look identical, so report counts.
                 if new_files > 0 || restamped_files > 0 {
                     causes.push(format!(
                         "{new_files} new, {restamped_files} with a different size or modification time"
@@ -1495,14 +1298,13 @@ impl IndexerManager {
                     retried: retry_paths.len().saturating_sub(given_up),
                     abandoned: given_up,
                     reason,
-                    // The value from before this crawl's sync, so a change is
-                    // visible instead of showing "no change" forever.
+                    // Pre-sync value, so a change is visible.
                     ocr_signature_stored: ocr_signature_before.clone(),
                     ocr_signature_now: crate::ocr::signature(),
                 });
             }
 
-            // First-scan completion gate: the first full crawl marks setup done.
+            // The first full crawl marks setup done.
             {
                 let mut cfg = config_arc.write();
                 if marks_first_scan_done(
@@ -1531,7 +1333,6 @@ impl IndexerManager {
                 files_count, content_count
             );
 
-            // Start file watcher for live changes, replacing any previous one.
             let handle = start_file_watcher(
                 watched_dirs,
                 metadata.clone(),
@@ -1541,7 +1342,6 @@ impl IndexerManager {
             );
             *watcher_handle.lock() = Some(handle);
 
-            // Start background embedding worker if semantic search is enabled
             if config_arc.read().semantic_enabled {
                 let mut eq_guard = embedding_queue.lock();
                 if eq_guard.is_none() {
@@ -1567,9 +1367,7 @@ impl IndexerManager {
             is_running.store(false, Ordering::SeqCst);
             gate_guard.armed = false;
 
-            // Fill in perceptual hashes that the crawl skipped, one image at a
-            // time. Safe to start here: the crawl transaction is committed and
-            // the worker pauses if another crawl begins.
+            // Safe here: the crawl transaction is committed and the worker pauses for crawls.
             start_phash_backfill(
                 Arc::clone(&metadata),
                 Arc::clone(&content_index),
@@ -1580,21 +1378,9 @@ impl IndexerManager {
         });
     }
 
-    /// Rebuilds the index in place and starts a fresh crawl, with no process
-    /// restart. The stores behind `Arc<RwLock<_>>` are emptied and swapped
-    /// live, the Tantivy writer is dropped with `content_index`, and the
-    /// normal crawl repopulates everything with its usual status events.
-    ///
-    /// The previous implementation wrote a marker and called
-    /// `AppHandle::restart()`, which spawned a second process while this one
-    /// still held the single-instance lock: on losing the race the fresh
-    /// instance exited and the old one was gone (the app closed and would not
-    /// open again), the marker consumer deleted `index/` and `metadata.db`
-    /// under the still-running old process, and re-spawning the binary
-    /// flashed a console window in dev builds.
+    /// Rebuilds the index in place (no restart) and starts a fresh crawl.
     pub fn rebuild_all(self: Arc<Self>) -> Result<(), String> {
-        // The rebuild gate is the crawl gate: reject instead of racing a crawl
-        // that is already running.
+        // The rebuild gate is the crawl gate: reject rather than race a running crawl.
         if self
             .is_running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1622,15 +1408,9 @@ impl IndexerManager {
         Ok(())
     }
 
-    /// Teardown half of `rebuild_all`: runs on its own thread because stopping
-    /// the embedding worker joins it, then hands the empty stores to the
-    /// normal crawl for repopulation.
+    /// Teardown half of `rebuild_all`, on its own thread because stopping the embedding worker joins it.
     fn run_rebuild(self: Arc<Self>) {
-        // A panic anywhere below would leave the crawl gate (`is_running`)
-        // stuck, blocking every later crawl and rebuild for the process
-        // lifetime. The guard hands the gate back even on an unwind; the
-        // paths that finish on purpose settle it first and release it
-        // themselves.
+        // Hands the gate back on unwind; intentional exits settle and release it themselves.
         struct GateGuard {
             gate: Arc<AtomicBool>,
             status: Arc<RwLock<IndexingStatus>>,
@@ -1657,9 +1437,7 @@ impl IndexerManager {
             settled: false,
         };
 
-        // Freeze every writer that touches the stores about to be wiped.
-        // Holding the crawl gate pauses the phash backfill and blocks new
-        // crawls; the watcher and the embedding worker are stopped here.
+        // Freeze every writer touching the stores about to be wiped.
         if let Some(mut handle) = self.watcher_handle.lock().take() {
             handle.stop();
         }
@@ -1674,14 +1452,10 @@ impl IndexerManager {
             Self::emit_status(&self.status_sink, &st);
         }
 
-        // Clearing `content_index` drops the Tantivy writer and reader, so
-        // nothing keeps the index directory locked afterwards (Windows cares).
+        // Drops the Tantivy writer/reader so nothing locks the index directory (Windows).
         *self.content_index.write() = None;
 
-        // Wipe the database through the live connection, then swap in a fresh
-        // in-memory store that reopens it empty. The wipe is plain SQL, so no
-        // open file handle anywhere can break it — unlike the delete-the-file
-        // approach of the old restart-based rebuild.
+        // Wipe the DB via the live connection (plain SQL, immune to open handles), then swap in a fresh store.
         if let Some(db) = self.metadata.read().db() {
             let _ = db.reset_visual_index();
             let _ = db.clear();
@@ -1691,9 +1465,7 @@ impl IndexerManager {
         self.visual_store.write().clear();
 
         let index_dir = KensakuConfig::index_dir();
-        // Deleting the directory reclaims the old segments outright. If a
-        // just-dropped mmap still holds a file (Windows), the fresh handle
-        // opens the stale index and `truncate` purges it logically instead.
+        // If a dropped mmap still holds a file (Windows), `truncate` purges the stale index instead.
         let reclaimed = std::fs::remove_dir_all(&index_dir).is_ok();
         let mut fresh_index = match ContentIndex::new(&index_dir) {
             Ok(index) => Some(index),
@@ -1707,8 +1479,6 @@ impl IndexerManager {
                 st.phase = "error".to_string();
                 st.current_status = format!("Rebuild failed: {}", e);
                 Self::emit_status(&self.status_sink, &st);
-                // The detailed status above is final for this run; the guard
-                // only needs to hand the crawl gate back.
                 guard.settled = true;
                 drop(guard);
                 return;
@@ -1720,9 +1490,7 @@ impl IndexerManager {
                 .expect("fresh index exists on the Ok path")
                 .truncate()
         {
-            // Purge failed too: the crawl below still overwrites documents
-            // for existing paths, but stale ones linger until a successful
-            // rebuild. Loud enough to notice.
+            // Purge failed: stale documents linger until a successful rebuild.
             crate::say_err!(
                 "[Kensaku] Rebuild: could not purge the old content index: {}",
                 e
@@ -1730,19 +1498,13 @@ impl IndexerManager {
         }
         *self.content_index.write() = fresh_index;
 
-        // Cached extractions would otherwise be served back into the fresh
-        // index instead of re-reading the files.
+        // Otherwise cached extractions would be served back into the fresh index.
         crate::indexer::extract::clear_cache();
 
-        // Thumbnails are derived data and regenerate during the crawl.
-        // Best-effort: files still open for a read are simply skipped.
+        // Thumbnails regenerate during the crawl; best-effort.
         let _ = std::fs::remove_dir_all(KensakuConfig::config_dir().join("thumbs"));
 
-        // Hand the empty stores to the normal crawl. Settle first so the
-        // guard touches no status, release the gate explicitly (the crawl
-        // must be able to take it again), then start: `start_indexing`
-        // re-takes the gate, emits its own walking status, and restarts the
-        // watcher and the embedding worker when done.
+        // Settle the guard and release the gate so `start_indexing` can re-take it.
         guard.settled = true;
         drop(guard);
         self.start_indexing();
@@ -1752,8 +1514,7 @@ impl IndexerManager {
         self.status.read().clone()
     }
 
-    /// Runs a query against the live, in-process stores (no second open, no
-    /// per-query metadata/vector reload). Used by the daemon search method.
+    /// Runs a query against the live, in-process stores.
     pub fn search_page(
         &self,
         query: &str,
@@ -1785,10 +1546,7 @@ impl IndexerManager {
         )
     }
 
-    /// Keyset-paginated exhaustive search for agent surfaces: returns the
-    /// page of matches strictly after `start_after` (a path cursor), so
-    /// result sets beyond the 10k exhaustive cap stay reachable without
-    /// materialising more than one window.
+    /// Keyset-paginated exhaustive search: the page of matches strictly after `start_after`.
     pub fn search_page_after(
         &self,
         query: &str,
@@ -1815,7 +1573,6 @@ impl IndexerManager {
         ))
     }
 
-    /// Looks up visually similar images for a given path.
     pub fn find_similar_images(
         &self,
         path: &std::path::Path,
@@ -1824,7 +1581,6 @@ impl IndexerManager {
         let metadata = self.metadata.read();
         let visual_store = self.visual_store.read();
 
-        // 1. Resolve source entry and vector
         let (source_node_id, query_vec) = if let Some(entry) = metadata.get(path) {
             let vec_opt = visual_store.get_vector(entry.id).map(|v| v.to_vec());
             (Some(entry.id), vec_opt)
@@ -1846,8 +1602,7 @@ impl IndexerManager {
                 {
                     v
                 } else if path.is_file() {
-                    // Budgeted decode, same as OCR: the page is charged to the
-                    // decode budget until embedding has consumed it.
+                    // Budgeted decode, charged until embedding has consumed it.
                     let (img, _reserved) =
                         crate::indexer::extract::image::decode_for_recognition(path)
                             .ok_or_else(|| {
@@ -1889,8 +1644,7 @@ impl IndexerManager {
         Ok(results)
     }
 
-    /// Compact live state shared by the daemon, CLI and MCP. Avoids loading
-    /// the embedding table or re-opening SQLite/Tantivy.
+    /// Compact live state for the daemon, CLI and MCP, without loading heavy stores.
     pub fn state_json(&self) -> Result<serde_json::Value, String> {
         let (files, dirs) = {
             let store = self.metadata.read();
@@ -1970,49 +1724,16 @@ impl IndexerManager {
         }))
     }
 
-    /// True while a live filesystem watcher is running.
     pub fn watcher_ok(&self) -> bool {
         self.watcher_ok.load(Ordering::Relaxed)
     }
 
-    /// True while a crawl is in progress.
-    ///
-    /// The watcher is stopped for the duration of a crawl and restarted when
-    /// it finishes, so "watcher not running" is the normal state during a scan
-    /// and must not be reported as a fault.
+    /// True while a crawl is in progress (the watcher is stopped during crawls).
     pub fn is_crawling(&self) -> bool {
         self.is_running.load(Ordering::Relaxed)
     }
 
-    /// Brings the process OCR state in line with config and the machine.
-    ///
-    /// - Applies `ocr_enabled` / `ocr_engine`.
-    /// - When Tesseract cannot run and PP-OCR is compiled in, switches to
-    ///   PP-OCR (the common case on a fresh Windows or Mac) and fetches its
-    ///   pack. This used to happen in the GUI only, bypassing every re-queue,
-    ///   so images indexed before the switch never got text.
-    /// - Compares [`crate::ocr::signature`] with the one recorded for this
-    ///   index. On a change (an engine became usable, the user switched, an
-    ///   OCR fix shipped) every image and PDF is re-queued and the extraction
-    ///   cache dropped.
-    ///
-    /// Returns how many images/PDFs were queued for a re-read. Zero is a
-    /// meaningful answer: the signature changed but nothing was left to
-    /// re-read, and a crawl reason must not blame OCR for work it did not
-    /// cause.
-    /// Brings the stored index in line with the effective per-directory mode.
-    ///
-    /// Every watched root is a rule: names-only when it appears in
-    /// `name_only_dirs`, name + content otherwise. The deepest rule wins, so a
-    /// nested watched folder can re-enable content below a names-only parent.
-    /// The previous rule set is persisted in `name-only-state`; comparing the
-    /// effective mode of each stored file (rather than just the directory
-    /// lists) covers settings changes, adding or removing watched roots and a
-    /// hand-edited config.json.
-    /// - A file that became names-only loses its content document and units.
-    /// - A file that became name + content is flagged pending, so the crawl
-    ///   extracts it even though it is unchanged on disk.
-    ///
+    /// Reconciles the stored index with each file's effective names-only/content mode.
     /// Returns how many files were flagged for extraction.
     fn sync_name_only_state(
         config_arc: &Arc<RwLock<KensakuConfig>>,
@@ -2090,6 +1811,7 @@ impl IndexerManager {
         marked
     }
 
+    /// Applies OCR config, re-queuing images/PDFs when the OCR signature changes; returns how many.
     fn sync_ocr_state(
         config_arc: &Arc<RwLock<KensakuConfig>>,
         metadata: &Arc<RwLock<MetadataStore>>,
@@ -2124,20 +1846,7 @@ impl IndexerManager {
             }
         }
 
-        // Never downgrade a stored signature to "no engine".
-        //
-        // The engine probe runs once per process and its failure is cached,
-        // and at startup it can fail for reasons that have nothing to do with
-        // this machine: the ONNX runtime library being scanned by antivirus,
-        // or a self-test losing a race with the engine pool loading. Writing
-        // "none" in that state meant the *next* launch saw a different
-        // signature and queued every image and scanned PDF for re-reading —
-        // a whole-corpus OCR pass triggered by a transient failure.
-        //
-        // Leaving the stored signature alone when nothing can read images
-        // keeps the "engine became usable, re-read the images" path intact
-        // for a first run (where nothing is stored yet) without letting a
-        // temporary failure re-read anything.
+        // Never downgrade a stored signature to "no engine": the probe can fail transiently.
         let signature = crate::ocr::signature();
         let stored = read_ocr_signature();
         if stored.as_deref() == Some(signature.as_str()) {
@@ -2167,22 +1876,7 @@ impl IndexerManager {
         marked
     }
 
-    /// Starts a crawl now, or as soon as the running one finishes. Used when
-    /// the OCR pack lands mid-crawl: a plain `start_indexing` would be a
-    /// no-op and the newly OCR-able images would wait for the next restart.
-    ///
-    /// Never crawls before the setup wizard is done: a pack download can
-    /// finish while the user has not chosen their folders yet, and the
-    /// config then still holds the default roots (the home directory), so
-    /// the wrong thing gets scanned and watched.
-    /// Clears semantic units that belong to a different embedding model, then
-    /// starts a crawl so they are rebuilt with the active one.
-    ///
-    /// The same reset runs at construction, which covered the restart case. It
-    /// did not cover downloading the model files while the app is running: the
-    /// units kept hashing vectors while queries used the real model, and two
-    /// different vector spaces compared against each other produce confident
-    /// nonsense. The registry now reloads on download and calls this.
+    /// Clears semantic units from a different embedding model and starts a crawl to rebuild them.
     pub fn on_semantic_model_changed(self: &Arc<Self>) {
         let expected_model_id = crate::embed::ModelRegistry::global().model_id;
         if let Some(db) = self.metadata.read().db() {
@@ -2205,13 +1899,11 @@ impl IndexerManager {
         self.start_indexing_when_idle();
     }
 
-    /// Asks the running crawl to stop at its next safe point.
     pub fn request_cancel(&self) {
         self.cancel_requested.store(true, Ordering::SeqCst);
     }
 
-    /// Stops the first-run crawl and returns setup to folder selection, so the
-    /// next launch shows the folder picker instead of resuming the scan.
+    /// Stops the first-run crawl and returns setup to folder selection.
     pub fn cancel_setup_scan(&self) -> Result<(), String> {
         self.request_cancel();
         let mut config = self.config.write();
@@ -2220,11 +1912,11 @@ impl IndexerManager {
         config.save()
     }
 
+    /// Starts a crawl now, or once the running one finishes; never before setup is done.
     pub fn start_indexing_when_idle(self: &Arc<Self>) {
         if !self.config.read().is_setup_complete {
             return;
         }
-        // One queued waiter is enough: later requests are served by it.
         if self.crawl_pending.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -2248,13 +1940,10 @@ impl IndexerManager {
         let ocr_changed =
             previous.ocr_enabled != config.ocr_enabled || previous.ocr_engine != config.ocr_engine;
         let extractors_changed = previous.extractors != config.extractors;
-        // Adding a nested watched root changes the effective mode of its files
-        // even when name_only_dirs is untouched, so both lists are part of the
-        // signature that triggers a reconcile crawl.
+        // Watched roots also change effective modes, so both lists trigger a reconcile.
         let mode_changed = previous.watched_dirs != config.watched_dirs
             || previous.name_only_dirs != config.name_only_dirs;
-        // Raising a content cap only helps files that were cut off before, and
-        // those are unchanged on disk, so they need an explicit re-read.
+        // Raised caps only help truncated files, which are unchanged on disk and need a re-read.
         let caps_raised = config.content_max_file_size_mb > previous.content_max_file_size_mb
             || config.content_max_text_bytes > previous.content_max_text_bytes
             || config.content_max_semantic_units > previous.content_max_semantic_units;
@@ -2268,7 +1957,6 @@ impl IndexerManager {
 
         let mut reindex = false;
         if mode_changed {
-            // The crawl reconciles the stored index (see `sync_name_only_state`).
             crate::indexer::extract::set_path_modes(&config.watched_dirs, &config.name_only_dirs);
             crate::indexer::extract::clear_cache();
             reindex = true;
@@ -2332,9 +2020,7 @@ impl IndexerManager {
             }
         }
 
-        // An OCR engine became usable without a config change (pack
-        // downloaded by the GUI while a daemon owns the index): the crawl's
-        // `sync_ocr_state` notices and re-queues.
+        // An OCR engine became usable without a config change; `sync_ocr_state` re-queues.
         if !reindex
             && config.ocr_enabled
             && read_ocr_signature().as_deref() != Some(crate::ocr::signature().as_str())
@@ -2349,35 +2035,24 @@ impl IndexerManager {
     }
 }
 
-/// Where the OCR signature of the current index is recorded.
-/// What the last crawl actually did.
-///
-/// Written at the end of every crawl so the reason a launch re-read files is
-/// visible after the fact. Without it, "indexing runs on every start" cannot
-/// be told apart from an ordinary reconcile: the diagnostics only went to
-/// stderr, which a packaged build never shows anyone.
+/// What the last crawl did, written so the reason for a re-read is visible afterwards.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CrawlReport {
     pub at: u64,
     /// Files and folders the walk visited.
     pub walked: usize,
-    /// Files whose content was extracted (i.e. actually re-read).
+    /// Files whose content was extracted (actually re-read).
     pub reindexed: usize,
-    /// Files that were absent from the content index before this crawl.
-    ///
-    /// A first scan, or an index that was recreated, re-reads every file
-    /// while reporting it here, so the doctor can tell an expected full scan
-    /// apart from churn over files it had already read.
+    /// Files absent from the content index before this crawl.
     #[serde(default)]
     pub new_files: usize,
     /// Files left pending for a retry after this crawl.
     pub retried: usize,
     /// Files dropped from the retry loop (retry budget exhausted).
     pub abandoned: usize,
-    /// Why anything was reindexed. "nothing changed" when nothing was.
+    /// Why anything was reindexed ("nothing changed" if nothing was).
     pub reason: String,
-    /// OCR state as recorded, and as computed by this launch. Equal values mean
-    /// no image should have been re-read for OCR.
+    /// OCR state as recorded vs. computed now; equal means no OCR re-read was due.
     #[serde(default)]
     pub ocr_signature_stored: Option<String>,
     #[serde(default)]
@@ -2399,7 +2074,6 @@ fn write_crawl_report(report: &CrawlReport) {
     }
 }
 
-/// The last recorded crawl, for the doctor and for support.
 pub fn last_crawl_report() -> Option<CrawlReport> {
     let raw = std::fs::read_to_string(crawl_report_path()).ok()?;
     serde_json::from_str(&raw).ok()
@@ -2414,11 +2088,6 @@ fn name_only_state_path() -> PathBuf {
 }
 
 /// The directory rules the index was last reconciled with.
-///
-/// Stored as normalized path strings so a restart compares exactly the same
-/// keys the in-memory resolver uses. `watched` is part of the signature:
-/// adding a nested watched root changes the effective mode of its files even
-/// when `name_only_dirs` is untouched.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct IndexModeState {
     watched: Vec<String>,
@@ -2449,10 +2118,7 @@ impl IndexModeState {
     }
 }
 
-/// Reads the last reconciled rules, or `None` when nothing was ever recorded.
-/// Older installs stored a bare `Vec<PathBuf>` of names-only directories;
-/// accepting that shape makes the first run after an upgrade reconcile from
-/// the legacy state instead of assuming every file had content.
+/// Reads the last reconciled rules; also accepts the legacy bare `Vec<PathBuf>` shape.
 fn read_index_mode_state() -> Option<IndexModeState> {
     let raw = std::fs::read_to_string(name_only_state_path()).ok()?;
     if let Ok(state) = serde_json::from_str::<IndexModeState>(&raw) {
@@ -2482,6 +2148,7 @@ fn write_index_mode_state(state: &IndexModeState) {
     }
 }
 
+/// Where the OCR signature of the current index is recorded.
 fn read_ocr_signature() -> Option<String> {
     std::fs::read_to_string(ocr_signature_path())
         .ok()
@@ -2567,13 +2234,9 @@ mod tests {
 
     #[test]
     fn cancelled_crawl_does_not_mark_first_scan_done() {
-        // Normal first scan finishing.
         assert!(marks_first_scan_done(true, false, false));
-        // The user cancelled: setup must stay unfinished.
         assert!(!marks_first_scan_done(true, false, true));
-        // Later crawls leave an already-finished first scan alone.
         assert!(!marks_first_scan_done(true, true, false));
-        // Setup was never configured.
         assert!(!marks_first_scan_done(false, false, false));
     }
 
@@ -2618,17 +2281,14 @@ mod tests {
 
     #[test]
     fn an_unstatable_file_is_not_treated_as_changed() {
-        // The walker records (0, 0) when metadata() fails: a file locked by
-        // another process, or one antivirus is scanning. That is a failure to
-        // read the file, not a file with no content that was modified in 1970.
+        // (0, 0) means metadata() failed, not an empty 1970 file.
         let existing = entry(100, 10, false);
         assert!(
             is_unchanged(&existing, &entry(0, 0, false)),
             "an unreadable stat must not force a re-read"
         );
 
-        // A genuinely emptied file keeps its modification time, so it is still
-        // detected: size changed, time did not.
+        // An emptied file keeps its mtime, so it is still detected.
         assert!(!is_unchanged(&existing, &entry(100, 0, false)));
     }
 
@@ -2715,10 +2375,8 @@ mod tests {
             .find_similar_images_local(path1.to_str().unwrap(), 10)
             .unwrap();
 
-        // 1. Query path1 must be excluded
         assert!(results.iter().all(|r| r.path != path1.to_string_lossy()));
 
-        // 2. path2 must be returned with similarity ~1.0
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, path2.to_string_lossy());
         assert!(results[0].similarity >= 0.99);
@@ -2745,9 +2403,7 @@ mod tests {
 
     #[test]
     fn panicking_crawl_releases_the_gate_and_clears_the_phase() {
-        // Regression for the headless-daemon report: a crawl that panics used
-        // to release the gate but leave `phase = "extracting"` at 0/N, so
-        // `health` and the GUI showed a crawl that no thread was running.
+        // A panicking crawl must release the gate and reset the phase.
         let gate = Arc::new(AtomicBool::new(true));
         let status = Arc::new(RwLock::new(crawling_status()));
         let handle = Arc::new(RwLock::new(None));
@@ -2793,7 +2449,6 @@ mod tests {
         assert_eq!(st.phase, "idle");
     }
 
-    /// Mirrors the normal completion path: release the gate, then disarm.
     fn gate_for_normal_path(guard: &mut CrawlGateGuard) {
         guard.gate.store(false, Ordering::SeqCst);
         guard.armed = false;

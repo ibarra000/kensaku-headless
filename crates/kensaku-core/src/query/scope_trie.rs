@@ -14,9 +14,8 @@ type ScopeCandidateCache = Mutex<HashMap<(usize, u64), Arc<Vec<usize>>>>;
 
 pub struct DirectoryTrie {
     root: TrieNode,
-    // Cached mapping from parent directory index to children indices
     children_map: HashMap<usize, Vec<usize>>,
-    // Cache for scope descendant candidate lists: (dir_idx, generation) -> Arc<Vec<usize>>
+    // (dir_idx, generation) -> descendant candidates
     scope_cache: ScopeCandidateCache,
     generation: u64,
 }
@@ -43,7 +42,6 @@ impl DirectoryTrie {
         let mut root = TrieNode::default();
         let mut children_map: HashMap<usize, Vec<usize>> = HashMap::new();
 
-        // 1. Build children map for DFS
         for (idx, entry) in entries.iter().enumerate() {
             if let Some(parent_path) = entry.path.parent()
                 && let Some(&parent_idx) = path_index.get(parent_path)
@@ -52,7 +50,6 @@ impl DirectoryTrie {
             }
         }
 
-        // 2. Insert all directory names into trie (folded to lowercase)
         for (idx, entry) in entries.iter().enumerate() {
             if entry.is_dir {
                 let name_folded = entry.name.to_lowercase();
@@ -72,7 +69,7 @@ impl DirectoryTrie {
         }
     }
 
-    /// Resolve a directory-looking token or `in:` target: exact > prefix > fuzzy.
+    /// Resolves a directory token or `in:` target: exact > prefix > fuzzy.
     pub fn resolve(
         &self,
         target: &str,
@@ -84,7 +81,6 @@ impl DirectoryTrie {
             return TrieMatchResult::None;
         }
 
-        // 1. If target looks like a path (starts with ~, ., / or has path separator)
         let expanded_path = if trimmed.starts_with('~') {
             if let Some(home) = dirs::home_dir() {
                 let rest = trimmed
@@ -111,7 +107,6 @@ impl DirectoryTrie {
             });
         }
 
-        // Try matching path suffix / relative path
         let target_norm = trimmed.replace('\\', "/").to_lowercase();
         let target_clean = target_norm.trim_end_matches('/');
 
@@ -138,10 +133,8 @@ impl DirectoryTrie {
             return TrieMatchResult::Ambiguous(path_matches);
         }
 
-        // 2. Trie match on directory name: exact > prefix > fuzzy
         let name_folded = target_clean.split('/').next_back().unwrap_or(target_clean);
 
-        // 2a. Exact match
         if let Some(indices) = self.find_exact(name_folded) {
             if indices.len() == 1 {
                 let idx = indices[0];
@@ -161,7 +154,6 @@ impl DirectoryTrie {
             }
         }
 
-        // 2b. Prefix match
         let prefix_indices = self.find_prefix(name_folded);
         if prefix_indices.len() == 1 {
             let idx = prefix_indices[0];
@@ -180,7 +172,6 @@ impl DirectoryTrie {
             return TrieMatchResult::Ambiguous(candidates);
         }
 
-        // 2c. Subsequence / fuzzy match on directory names
         let mut fuzzy_matches = Vec::new();
         for (idx, entry) in entries.iter().enumerate() {
             if entry.is_dir {
@@ -235,7 +226,7 @@ impl DirectoryTrie {
         }
     }
 
-    /// Retrieve all descendant entry indices using DFS with generational cache.
+    /// All descendant entry indices, cached per generation.
     pub fn get_scope_candidates(&self, dir_idx: usize, current_gen: u64) -> Arc<Vec<usize>> {
         let key = (dir_idx, current_gen);
         {
@@ -245,14 +236,12 @@ impl DirectoryTrie {
             }
         }
 
-        // Compute DFS traversal over child lists: O(subtree)
         let mut candidates = Vec::new();
         candidates.push(dir_idx);
         self.dfs_collect(dir_idx, &mut candidates);
 
         let arc = Arc::new(candidates);
         let mut cache = self.scope_cache.lock();
-        // Evict stale generations if generation changed
         if self.generation != current_gen {
             cache.retain(|&(_, cached_generation), _| cached_generation == current_gen);
         }
@@ -275,7 +264,7 @@ mod tests {
     use super::*;
     use crate::indexer::walker::FileEntry;
 
-    /// entries: absolute-ish dirs/files. Returns (entries, path_index).
+    /// Returns (entries, path_index).
     fn fixture(entries: &[(&str, bool)]) -> (Vec<FileEntry>, HashMap<PathBuf, usize>) {
         let mut list = Vec::new();
         let mut index = HashMap::new();
@@ -395,11 +384,7 @@ mod tests {
     fn resolve_prefix_beats_fuzzy_tier() {
         let (entries, index) = sample();
         let t = trie(&entries, &index);
-        // "ot" exactly prefixes "other" and no other dir name, even though
-        // fuzzy "contains" would also accept nothing else. Single result.
         assert_eq!(dir_of(&t.resolve("ot", &entries, &index)), Some(3));
-        // "ther" matches nothing exactly or by prefix; the fuzzy tier still
-        // finds "other" via substring containment.
         assert_eq!(dir_of(&t.resolve("ther", &entries, &index)), Some(3));
     }
 
@@ -435,8 +420,6 @@ mod tests {
     fn resolve_path_suffix_match() {
         let (entries, index) = sample();
         let t = trie(&entries, &index);
-        // A relative path that ends a real directory path, and is not a
-        // registered path index entry itself.
         assert_eq!(
             dir_of(&t.resolve("projects/kensaku", &entries, &index)),
             Some(2)
@@ -447,9 +430,7 @@ mod tests {
     fn resolve_file_path_never_becomes_a_dir_scope() {
         let (entries, index) = sample();
         let t = trie(&entries, &index);
-        // The file is registered in path_index but is not a dir; the suffix
-        // branch and the name trie also only ever contain dirs. A file path
-        // must resolve to None, never pretend to be a directory scope.
+        // A file path must never resolve as a directory scope.
         assert_eq!(
             dir_of(&t.resolve("/home/gochi/projects/kensaku/src/main.rs", &entries, &index)),
             None
@@ -470,8 +451,7 @@ mod tests {
     fn resolve_tilde_expands_to_home_and_matches() {
         let (entries, index) = sample();
         let t = trie(&entries, &index);
-        // Only meaningful if the fixture home matches the real home dir;
-        // build refs the real $HOME through dirs::home_dir.
+        // Only meaningful when the fixture home matches the real home dir.
         if dirs::home_dir()
             .map(|h| h.ends_with("gochi"))
             .unwrap_or(false)
@@ -531,9 +511,6 @@ mod tests {
         let (entries, index) = sample();
         let mut t = trie(&entries, &index);
         let stale = t.get_scope_candidates(1, 1);
-        // Build replaces the whole structure on a real refresh; here the
-        // generation differs from the cache key, so a new gen re-computes
-        // and evicts the stale entries.
         t.generation = 2;
         let fresh = t.get_scope_candidates(1, 2);
         assert!(

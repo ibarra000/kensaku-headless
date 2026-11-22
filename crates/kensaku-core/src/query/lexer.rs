@@ -13,9 +13,7 @@ pub enum Token {
     Regex(String),
 }
 
-/// Inside quotes, a backslash escapes only `"` and another backslash. Any other
-/// backslash is literal, so Windows paths (`in:"C:\Users\me"`) and regex
-/// classes (`re:"\d+"`) survive as typed.
+/// Inside quotes only `\"` and `\` are escapes, so Windows paths and regex classes survive.
 fn is_escape(chars: &[char], i: usize) -> bool {
     chars[i] == '\\' && matches!(chars.get(i + 1), Some('"') | Some('\\'))
 }
@@ -27,7 +25,6 @@ pub fn tokenize(input: &str) -> Vec<Token> {
     let mut i = 0;
 
     while i < len {
-        // Skip whitespace
         while i < len && chars[i].is_whitespace() {
             i += 1;
         }
@@ -42,7 +39,6 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             false
         };
 
-        // Check if starting quote
         if i < len && chars[i] == '"' {
             i += 1; // skip opening quote
             let mut text = String::new();

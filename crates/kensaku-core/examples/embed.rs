@@ -1,19 +1,12 @@
-//! Embedding Kensaku in a Rust application.
-//!
-//!   cargo run -p kensaku-core --example embed -- <folder> <query>
-//!
-//! Uses a throwaway data directory under the system temp dir, owns the index
-//! in-process with `Engine`, indexes `<folder>`, waits for the first scan and
-//! prints the top hits. Swap `Engine::open()` for `Client::connect()` to talk
-//! to a `kensaku` daemon instead.
+//! Embedding Kensaku in-process: `cargo run -p kensaku-core --example embed -- <folder> <query>`.
+//! Swap `Engine::open()` for `Client::connect()` to use a daemon instead.
 
 use kensaku_core::api::{Engine, Kensaku};
 use kensaku_core::ops::setup::SetupRequest;
 use std::time::{Duration, Instant};
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(300);
-/// A tiny folder can finish before the first poll; after this long, idle
-/// counts as done even if no running state was observed.
+/// A tiny folder can finish before the first poll; after this, idle counts as done.
 const START_GRACE: Duration = Duration::from_secs(5);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,7 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     })?;
 
-    // Wait for the first crawl to begin and finish.
     let started = Instant::now();
     let mut seen_running = false;
     while started.elapsed() < SCAN_TIMEOUT {

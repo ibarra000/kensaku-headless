@@ -1,39 +1,5 @@
-//! Loopback HTTP + SSE transport for the agent surface.
-//!
-//! One long-lived process serves the existing MCP tool surface over HTTP so
-//! web-capable MCP clients and long-lived agents can attach without a stdio
-//! parent. The security model matches the daemon:
-//!
-//! - **Loopback only.** The listener binds `127.0.0.1` and rejects any peer
-//!   that is not a loopback address.
-//! - **Token auth.** Every request needs `Authorization: Bearer <token>`;
-//!   the token lives in `<config>/http.token` (0600) and is printed to
-//!   stderr once at startup.
-//! - **Read-only by default.** `reindex` is never enabled over MCP here, and
-//!   `/v1` write methods answer `403` unless the server was started with
-//!   `--allow-writes`. `/v1` file-reading methods honor `agent_scoped_roots`.
-//!
-//! Endpoints:
-//!
-//! - `POST /mcp` — MCP Streamable HTTP: JSON-RPC request in, JSON-RPC
-//!   response out. With `Accept: text/event-stream` the same response is
-//!   delivered as a single `message` SSE event.
-//! - `GET /mcp` — `405`; this server is stateless and opens no server→client
-//!   notification stream.
-//! - `GET /health` — same payload as the MCP `health_check` tool.
-//! - `GET /search?q=<query>` — convenience REST search, same payload shape
-//!   and budgets as the MCP `search` tool.
-//! - `GET /events` — SSE keepalive stream (liveness signal).
-//! - `GET|POST /v1/<method>` — the full Kensaku API ([`crate::api::METHODS`]),
-//!   forwarded to the daemon (started on demand). GET takes parameters from
-//!   the query string, POST from a JSON body. Errors are
-//!   `{"error": {"code", "message"}}` with a matching status.
-//! - `GET /v1/events` — SSE stream of `status` events whenever indexing
-//!   progress changes.
-//!
-//! Hand-rolled on `std::net` (the daemon transport avoids HTTP frameworks
-//! too): requests are parsed permissively, responses are conservative, and
-//! every connection is one request → one response → close.
+//! Loopback HTTP + SSE transport for MCP (`/mcp`) and the `/v1/<method>` API.
+//! Loopback-only, bearer token from `<config>/http.token`, read-only unless `--allow-writes`.
 
 use super::{AgentSession, HeadlessIndex};
 use serde_json::{Value, json};
@@ -47,27 +13,20 @@ use std::time::Duration;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
-/// SSE keepalive interval, well under typical proxy timeouts.
 const SSE_KEEPALIVE_SECS: u64 = 15;
-/// An SSE connection is dropped after this long without a real event.
 const SSE_MAX_IDLE_SECS: u64 = 300;
 pub const DEFAULT_PORT: u16 = 8765;
-/// How often `/v1/events` polls the daemon for status changes.
 const STATUS_POLL: Duration = Duration::from_secs(1);
 
-/// Transport options for [`serve`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ServeOptions {
-    /// Allow `Access::Write` methods on `/v1`.
     pub allow_writes: bool,
 }
 
-/// Set by the SIGINT handler so the accept loop can unwind without a crate
-/// dependency on signal handling.
+/// Set by the SIGINT handler so the accept loop can unwind.
 static SIGINT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Installs a minimal SIGINT handler (loopback server: storing one atomic
-/// boolean from the handler is async-signal-safe). No-op on non-unix.
+/// Installs a minimal SIGINT handler; no-op on non-unix.
 pub fn install_ctrl_c() {
     #[cfg(unix)]
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
@@ -103,7 +62,6 @@ pub fn token_path(config_dir: &Path) -> PathBuf {
     config_dir.join("http.token")
 }
 
-/// Reads the HTTP token, generating and persisting one when absent.
 pub fn ensure_token(config_dir: &Path) -> Result<String, String> {
     let path = token_path(config_dir);
     if let Ok(existing) = std::fs::read_to_string(&path) {
@@ -122,7 +80,6 @@ pub fn ensure_token(config_dir: &Path) -> Result<String, String> {
     Ok(token)
 }
 
-/// Long-lived server state shared across connections.
 struct HttpState {
     session: Mutex<Option<AgentSessionState>>,
     token: String,
@@ -131,10 +88,7 @@ struct HttpState {
     options: ServeOptions,
 }
 
-/// Backend for the server lifetime: the daemon when one is reachable
-/// (matching MCP session semantics), else a lazily-opened read-only local
-/// index, else none (initialize still answers; tools explain what is
-/// missing).
+/// Session backend: daemon if reachable, else lazily-opened local index, else none.
 struct AgentSessionState {
     daemon: bool,
     index: Option<Box<HeadlessIndex>>,
@@ -152,8 +106,7 @@ impl AgentSessionState {
     }
 }
 
-/// Runs the server until `shutdown` is set. Opens the index lazily on first
-/// use (a missing index is not fatal; MCP `initialize` must still answer).
+/// Runs until `shutdown`; a missing index is not fatal (MCP `initialize` must still answer).
 pub fn serve(
     config_dir: &Path,
     port: u16,
@@ -167,8 +120,7 @@ pub fn serve(
     serve_on_listener(listener, token, shutdown, options)
 }
 
-/// Server body over an already-bound listener. Split from [`serve`] so tests
-/// can bind port 0 and learn the real port.
+/// [`serve`] over a bound listener (lets tests bind port 0).
 pub fn serve_on_listener(
     listener: TcpListener,
     token: String,
@@ -221,8 +173,7 @@ pub fn serve_on_listener(
 }
 
 fn handle_connection(stream: TcpStream, state: &HttpState) {
-    // Loopback is enforced twice: bind is loopback-only, and the peer address
-    // is checked per connection in case the socket ever gets wider.
+    // Defense in depth: bind is loopback-only, but also check each peer.
     if !stream
         .peer_addr()
         .map(|addr| addr.ip().is_loopback())
@@ -267,11 +218,8 @@ fn handle_connection(stream: TcpStream, state: &HttpState) {
 
 #[derive(Debug, PartialEq)]
 enum KeepAlive {
-    /// Hold the connection open with keepalive comments (the `/events` stream).
     Hold,
-    /// The SSE response is complete; close after the body.
     Close,
-    /// Stream `status` events from the daemon.
     Status,
 }
 
@@ -284,8 +232,7 @@ struct Request {
     body: Vec<u8>,
 }
 
-/// Reads one HTTP/1.x request (headers + bounded body). Returns `None` on
-/// parse failure, EOF, or an oversized/malformed request.
+/// Reads one bounded HTTP/1.x request; `None` on malformed, oversized or EOF.
 fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).ok()? == 0 {
@@ -356,9 +303,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
 }
 
 enum Route {
-    /// A plain response; the connection closes after the body.
     Body(HttpResponse),
-    /// An `text/event-stream` body, optionally held open with keepalives.
     Sse(Vec<u8>, KeepAlive),
 }
 
@@ -370,7 +315,7 @@ struct HttpResponse {
 }
 
 fn route_request(request: &Request, state: &HttpState) -> Route {
-    // Auth first: everything requires the bearer token.
+    // Every route requires the bearer token.
     if request.token.as_deref() != Some(state.token.as_str()) {
         return Route::Body(json_response(
             401,
@@ -420,7 +365,6 @@ fn health_response(state: &HttpState) -> HttpResponse {
     json_response(200, "OK", &payload)
 }
 
-/// Runs a closure with the shared session, opening the index lazily.
 fn with_session<T>(state: &HttpState, f: impl FnOnce(&AgentSession<'_>) -> T) -> T {
     let mut guard = state.session.lock().expect("http session lock");
     if guard.is_none() {
@@ -452,14 +396,13 @@ fn handle_mcp_post(request: &Request, state: &HttpState) -> Route {
         }
     };
 
-    // Read-only transport: reindex is never offered or honored here, no
-    // matter what config says.
+    // Reindex is never honored over HTTP, regardless of config.
     let response = with_session(state, |session| {
         super::mcp::handle_request_session(session, &body, false)
     });
 
     let Some(response) = response else {
-        // Notification: 202 Accepted with an empty body, per streamable HTTP.
+        // Notification: 202 with empty body, per streamable HTTP.
         return Route::Body(HttpResponse {
             status: 202,
             reason: "Accepted",
@@ -553,7 +496,7 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-/// `/v1/<method>`: gate on access class, then forward to the daemon.
+/// Gates on access class, then forwards to the daemon.
 fn handle_v1(http_method: &str, name: &str, request: &Request, state: &HttpState) -> HttpResponse {
     use crate::api::{Access, ApiError, ErrorCode};
 
@@ -600,9 +543,7 @@ fn handle_v1(http_method: &str, name: &str, request: &Request, state: &HttpState
     }
 }
 
-/// Config keys that would widen what this transport can read or execute
-/// (external extractors run programs; scope and denylists gate file reads).
-/// Change them with the CLI, not over HTTP.
+/// Keys that widen what HTTP can read or execute; change via the CLI only.
 const HTTP_PROTECTED_CONFIG_KEYS: [&str; 4] = [
     "extractors",
     "agent_scoped_roots",
@@ -641,8 +582,7 @@ fn daemon_config() -> Result<crate::config::KensakuConfig, crate::api::ApiError>
         .map_err(|e| crate::api::ApiError::internal(e.to_string()))
 }
 
-/// Drops search hits the agent scope or extension denylist would refuse,
-/// so `/v1/search` snippets cannot leak out-of-scope file content.
+/// Drops hits outside agent scope / denylist so snippets cannot leak.
 fn scope_results(mut result: Value, config: &crate::config::KensakuConfig) -> Value {
     if let Some(results) = result.get_mut("results").and_then(Value::as_array_mut) {
         results.retain(|hit| {
@@ -658,8 +598,7 @@ fn scope_results(mut result: Value, config: &crate::config::KensakuConfig) -> Va
     result
 }
 
-/// GET: query-string values (parsed as JSON when possible, else strings).
-/// POST: a JSON object body (empty body = no params).
+/// GET: query string (JSON-parsed when possible); POST: JSON object body.
 fn v1_params(http_method: &str, request: &Request) -> Result<Value, crate::api::ApiError> {
     if http_method == "POST" {
         if request.body.iter().all(u8::is_ascii_whitespace) {
@@ -684,9 +623,7 @@ fn v1_params(http_method: &str, request: &Request) -> Result<Value, crate::api::
     Ok(Value::Object(map))
 }
 
-/// File-reading methods over HTTP: every path must be inside the agent
-/// scope, pass the extension denylist, and (except `validate_dir`) be part of
-/// the index, so a token holder cannot read arbitrary files.
+/// Paths must be in scope, pass the denylist, and (except `validate_dir`) be indexed.
 fn check_file_scope(
     name: &str,
     params: &Value,
@@ -785,9 +722,7 @@ fn write_response(writer: &mut TcpStream, response: &HttpResponse) -> std::io::R
     writer.flush()
 }
 
-/// Streams `status` events whenever indexing progress changes, with
-/// keepalives in between. Ends on shutdown, client disconnect, or a daemon
-/// that stops answering.
+/// Streams `status` events on progress changes; ends on shutdown, disconnect or daemon loss.
 fn sse_status(writer: &mut TcpStream, shutdown: &AtomicBool) {
     let mut last = String::new();
     let mut since_write = Duration::ZERO;
@@ -816,8 +751,7 @@ fn sse_status(writer: &mut TcpStream, shutdown: &AtomicBool) {
     }
 }
 
-/// Holds an SSE connection open with comment keepalives, giving up after
-/// [`SSE_MAX_IDLE_SECS`] so abandoned connections cannot accumulate.
+/// SSE keepalives, giving up after [`SSE_MAX_IDLE_SECS`] so abandoned connections don't pile up.
 fn sse_hold(writer: &mut TcpStream, shutdown: &AtomicBool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(SSE_MAX_IDLE_SECS);
     while !shutdown.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
@@ -830,8 +764,7 @@ fn sse_hold(writer: &mut TcpStream, shutdown: &AtomicBool) {
     let _ = writer.flush();
 }
 
-/// Parses `--port N` (or `--port=N`) from serve args, defaulting to
-/// [`DEFAULT_PORT`].
+/// Parses `--port N` / `--port=N`, defaulting to [`DEFAULT_PORT`].
 pub fn parse_port(args: &[String]) -> Result<u16, String> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -901,7 +834,6 @@ mod tests {
                 ServeOptions::default(),
             );
         });
-        // Wait for the listener to accept.
         for _ in 0..100 {
             if TcpStream::connect_timeout(
                 &format!("127.0.0.1:{}", port).parse().unwrap(),
@@ -1075,9 +1007,7 @@ Host: x
         );
         assert_eq!(status, 200);
         let payload: Value = serde_json::from_str(&body).unwrap();
-        // `ok` depends on whether a real Kensaku index exists on this
-        // machine; the contract under test is that /health answers with the
-        // standard shape either way.
+        // `ok` depends on whether a real index exists; only the shape is tested.
         assert!(payload["ok"].is_boolean());
         assert!(payload["health"].is_object());
     }

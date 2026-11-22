@@ -1,12 +1,5 @@
-//! One-click agent connect: generate and install Kensaku MCP configs for the
-//! common clients.
-//!
-//! Kensaku is one binary with two surfaces (`kensaku mcp` over stdio, plus
-//! the loopback HTTP transport); every client config points at the same
-//! read-only server. Installation means a **merge** into the client's own
-//! config file — never a rewrite of the whole file — with a `.bak` backup
-//! left next to it. The manual JSON fallback stays available in the UI and
-//! via `kensaku connect <client> --print`.
+//! Generates and merges Kensaku MCP configs into common clients' config files.
+//! Installs merge (never rewrite) and leave a `.bak` backup.
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -46,11 +39,10 @@ impl Client {
 pub struct ClientStatus {
     pub id: &'static str,
     pub name: &'static str,
-    /// Absolute config path when the client's config dir is locatable.
     pub config_path: Option<String>,
-    /// True when the config file already exists on disk.
+    /// Config file exists on disk.
     pub installed: bool,
-    /// True when the file exists and already wires `kensaku`.
+    /// Config file already wires `kensaku`.
     pub configured: bool,
 }
 
@@ -62,18 +54,14 @@ pub struct InstallOutcome {
     pub message: String,
 }
 
-/// Candidate config paths for a client on this OS. The first existing file
-/// wins for `installed`/`configured` and for the install target; otherwise the
-/// first locatable path is used.
+/// Candidate config paths; the first existing file wins, else the first locatable path.
 fn config_paths(client: Client) -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
     match client {
         Client::ClaudeDesktop => {
-            // macOS keeps app data in ~/Library/Application Support; the Linux
-            // and Windows builds read from the platform config dir
-            // (~/.config and %APPDATA% respectively).
+            // macOS: ~/Library/Application Support; Linux/Windows: platform config dir.
             #[cfg(target_os = "macos")]
             let base = dirs::data_dir();
             #[cfg(not(target_os = "macos"))]
@@ -95,8 +83,7 @@ pub fn primary_path(client: Client) -> Option<PathBuf> {
         .or_else(|| paths.into_iter().next())
 }
 
-/// The MCP server entry for Kensaku, with the best absolute path we can find
-/// for `kensaku`.
+/// Kensaku MCP server entry, with the best absolute `kensaku` path found.
 pub fn server_entry() -> Value {
     json!({
         "command": cli_command(),
@@ -104,15 +91,13 @@ pub fn server_entry() -> Value {
     })
 }
 
-/// Best-effort absolute path to the `kensaku` binary.
 pub fn cli_command() -> String {
     crate::daemon::kensaku_binary()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "kensaku".to_string())
 }
 
-/// Status for every supported client (locatable config path, installed,
-/// configured). Never fails: unlocatable clients report `None`.
+/// Status for every supported client; never fails.
 pub fn detect_clients() -> Vec<ClientStatus> {
     Client::ALL
         .iter()
@@ -163,7 +148,6 @@ fn has_kensaku(servers: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// The ready-to-paste JSON snippet for a client's config file.
 pub fn config_snippet(_client: Client) -> Result<String, String> {
     let pretty = serde_json::to_string_pretty(&json!({
         "mcpServers": {
@@ -174,17 +158,14 @@ pub fn config_snippet(_client: Client) -> Result<String, String> {
     Ok(pretty)
 }
 
-/// `<path>.bak`, preserving the full original file name (e.g.
-/// `~/.claude.json.bak`, not `~/.claude.bak`).
+/// `<path>.bak`, keeping the full file name (`~/.claude.json.bak`).
 fn backup_path(path: &std::path::Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".bak");
     path.with_file_name(name)
 }
 
-/// Writes `contents` through a sibling temp file and renames it into place, so
-/// an interrupted write cannot truncate the user's config. New files are 0600;
-/// an existing file keeps its mode.
+/// Temp-file + rename so an interrupted write can't truncate the config. New files 0600; existing keep mode.
 fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Err(format!("{} has no parent directory", path.display()));
@@ -219,11 +200,7 @@ fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
     })
 }
 
-/// Merges the Kensaku entry into the client's config file.
-///
-/// Creates missing parent dirs and the file itself, backs up any previous
-/// content to `<path>.bak`, and never removes unrelated entries. The write is
-/// atomic. Returns the post-install status.
+/// Merges the Kensaku entry atomically, backing up to `<path>.bak`; unrelated entries are kept.
 pub fn install(client: Client) -> Result<InstallOutcome, String> {
     let Some(path) = primary_path(client) else {
         return Err(format!(
@@ -375,7 +352,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
         write_atomic(&path, "{\"a\":2}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":2}");
-        // No temp files are left behind.
         let leftovers: Vec<_> = std::fs::read_dir(dir.join("nested"))
             .unwrap()
             .filter_map(Result::ok)

@@ -13,22 +13,14 @@ pub struct MetadataStore {
     arena: NodeArena,
     path_index: PathIndex,
     id_index: RwLock<Option<IdIndex>>,
-    /// Parallel to `arena`: burst id per arena slot, 0 means unassigned.
+    /// Burst id per arena slot; 0 means unassigned.
     bursts: RwLock<Option<Vec<u64>>>,
     db: Option<Arc<MetadataDb>>,
     generation: AtomicU64,
     dir_generation: AtomicU64,
     usage: RwLock<HashMap<PathBuf, (u32, u64)>>,
     cached_trie: RwLock<Option<(u64, Arc<DirectoryTrie>)>>,
-    /// Materialized entries for the current generation.
-    ///
-    /// Building one is several allocations per file: the path is rebuilt from
-    /// the arena, a PathBuf is joined, the name is copied. Search needs the
-    /// whole list on every query, so it is cached here, per store, next to the
-    /// trie cache and invalidated the same way. Per store rather than global
-    /// because more than one store can exist in a process (the daemon, a
-    /// headless agent index, a test fixture), and a global cache would hand one
-    /// store's rows to another.
+    /// Materialized entries for the current generation; per store since several stores can share a process.
     cached_entries: RwLock<Option<(u64, Arc<Vec<crate::indexer::walker::FileEntry>>)>>,
 }
 
@@ -113,9 +105,7 @@ impl MetadataStore {
         *self.bursts.write() = None;
 
         let count = entries.len();
-        // First pass: push nodes (parents resolved later). The path index is
-        // built last: its `grow` re-keys slots from `arena.path()`, which is only
-        // the bare file name until parents are linked.
+        // First pass: push nodes. The path index is built last, once parents are linked.
         let mut idxs = Vec::with_capacity(entries.len());
         let mut by_path: std::collections::HashMap<&Path, u32> =
             std::collections::HashMap::with_capacity(entries.len());
@@ -146,7 +136,6 @@ impl MetadataStore {
             by_path.insert(entry.path.as_path(), idx);
             idxs.push(idx);
         }
-        // Second pass: resolve parent pointers.
         for (entry, &idx) in entries.iter().zip(idxs.iter()) {
             let parent = entry
                 .path
@@ -165,7 +154,6 @@ impl MetadataStore {
                 node.parent = parent;
             }
         }
-        // Third pass: every node now has its final name and parent.
         for (entry, &idx) in entries.iter().zip(idxs.iter()) {
             self.path_index.insert(&self.arena, &entry.path, idx);
         }
@@ -220,15 +208,12 @@ impl MetadataStore {
     pub fn add(&mut self, entry: FileEntry) -> u64 {
         let is_dir = entry.is_dir;
         let mut entry_id = entry.id;
-        // find existing
         let existing = self.find_path_index(&entry.path);
         let idx = if let Some(idx) = existing {
-            // preserve content_pending
             let mut pending = self.arena.node(idx).content_pending();
             if self.arena.node(idx).content_pending() {
                 pending = true;
             }
-            // update node
             let ext_id = self.arena.intern_ext(entry.extension);
             let parent = self.parent_index_for(&entry.path);
             let node_name = if parent == NO_PARENT {
@@ -305,7 +290,6 @@ impl MetadataStore {
         }
 
         if let Some(db) = self.db.as_ref() {
-            // Need a FileEntry view for db upsert
             let view = self.materialize(idx);
             match db.upsert(&view) {
                 Ok(id) => {
@@ -344,8 +328,7 @@ impl MetadataStore {
         NO_PARENT
     }
 
-    /// Marks every image and PDF for a content re-read. Used when what OCR
-    /// produces has changed (an engine became usable, an OCR fix shipped).
+    /// Marks every image and PDF for re-read when OCR output changes.
     pub fn mark_ocr_targets_pending(&mut self) -> usize {
         let mut marked = 0;
         for i in 0..self.arena.len() {
@@ -381,7 +364,6 @@ impl MetadataStore {
             if node.is_dir() {
                 continue;
             }
-            // extension check
             let ext = self.arena.extension(idx);
             let is_img = ext
                 .as_deref()
@@ -405,8 +387,7 @@ impl MetadataStore {
         marked
     }
 
-    /// Marks files with any of `extensions` for a content re-read. Used when
-    /// external extractors are added, removed or changed.
+    /// Marks files with these extensions for re-read (external extractors changed).
     pub fn mark_extensions_pending(&mut self, extensions: &[String]) -> usize {
         let wanted: std::collections::HashSet<String> = extensions
             .iter()
@@ -451,9 +432,7 @@ impl MetadataStore {
         marked
     }
 
-    /// Flags every file below any of `dirs` for a content re-read. Used when a
-    /// directory leaves name-only mode: its files are unchanged on disk, so
-    /// without the flag the crawl would never extract them.
+    /// Flags files below `dirs` for re-read when they leave name-only mode.
     pub fn mark_dirs_pending(&mut self, dirs: &[PathBuf]) -> usize {
         if dirs.is_empty() {
             return 0;
@@ -483,9 +462,7 @@ impl MetadataStore {
         marked
     }
 
-    /// Flags exactly these files for a content re-read. Used when a path's
-    /// effective index mode changes back to "name + content": the files are
-    /// unchanged on disk, so the incremental crawl would otherwise skip them.
+    /// Flags these files for re-read when their index mode returns to name + content.
     pub fn mark_paths_pending(&mut self, paths: &[PathBuf]) -> usize {
         if paths.is_empty() {
             return 0;
@@ -515,8 +492,7 @@ impl MetadataStore {
         marked
     }
 
-    /// Forces a content re-read for every file (used after a content-index
-    /// schema migration). Directories keep their metadata.
+    /// Forces a content re-read for every file (after schema migration).
     pub fn mark_all_content_pending(&mut self) -> usize {
         let mut marked = 0;
         for i in 0..self.arena.len() {
@@ -537,7 +513,6 @@ impl MetadataStore {
         marked
     }
 
-    /// Flags one file for a content re-read on the next crawl.
     pub fn set_content_pending(&mut self, path: &Path) {
         if let Some(idx) = self.find_path_index(path) {
             let node = self.arena.node(idx);
@@ -657,7 +632,6 @@ impl MetadataStore {
             return Vec::new();
         }
 
-        // conflicts
         let mut conflicts: Vec<PathBuf> = Vec::new();
         for i in 0..self.arena.len() {
             let idx = i as u32;
@@ -690,15 +664,7 @@ impl MetadataStore {
                 }
             }
         }
-        // Snapshot the subtree before changing any name.
-        //
-        // `arena.path()` is reconstructed from the parent chain, so rewriting
-        // an ancestor's name changed every descendant's derived path. The
-        // single-pass version below that mutated as it scanned therefore
-        // matched the renamed root and then failed `strip_prefix(old)` for
-        // every child: only the root reached `old_paths`, it has no document
-        // of its own, and every `old/**` document stayed in the content index
-        // forever under a path that no longer exists.
+        // Snapshot the subtree first: `arena.path()` derives from the parent chain, so renaming mid-scan breaks descendants.
         let mut moved: Vec<(u32, PathBuf, PathBuf)> = Vec::new();
         for i in 0..self.arena.len() {
             let idx = i as u32;
@@ -716,7 +682,6 @@ impl MetadataStore {
 
         for (idx, old_path, new_path) in moved {
             old_paths.push(old_path);
-            // update name (file_name) and char_bloom
             let new_name = new_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -726,33 +691,16 @@ impl MetadataStore {
             node.name_off = name_off;
             node.name_len = name_len;
             node.char_bloom = crate::search::fuzzy::compute_char_mask(&new_name);
-            // store new path? We don't store full path; path derived from parent chain.
-            // Parent chain unchanged (directory renamed would require updating parents).
-            // For correctness, update parent pointers? Complex. Instead, rebuild path_index after.
         }
 
         if old_paths.is_empty() {
             return old_paths;
         }
 
-        // Rebuild path_index
         self.path_index.clear();
         for i in 0..self.arena.len() {
             let idx = i as u32;
             let p = self.arena.path(idx);
-            // Wait: path() derives from parent chain + names. If we only updated leaf names,
-            // parent directories names not updated for rename_prefix of a directory.
-            // This is a known limitation; rename_prefix in original updated path strings.
-            // To handle directory renames properly, we'd need update all descendants' parent names?
-            // Our arena stores names per node; renaming a directory means renaming that node's name,
-            // and descendants keep parent pointers, so path() will reflect new dir name. Good.
-            // But we updated only nodes whose path starts with old? We updated names for those nodes
-            // based on new_path.file_name(), which for a child keeps its own name, not parent. Oops.
-            // Actually for a directory rename, the directory node's name should change to new's last component;
-            // descendants keep their names. Our loop changed EVERY descendant's name to its new_path last component,
-            // which is wrong (child name becomes same as? new_path for child is new/child, file_name=child, okay).
-            // For the renamed root itself, new_path=new, file_name=new last comp. Good.
-            // So names are okay.
             self.insert_path_index(&p, idx);
         }
 
@@ -798,16 +746,9 @@ impl MetadataStore {
         self.usage.read().get(path).copied().unwrap_or((0, 0))
     }
 
-    /// The materialized entry list for the current generation.
-    ///
-    /// Returned behind an `Arc` of immutable rows, so a query can hold the list
-    /// while another thread mutates the store: the worst case is one query
-    /// seeing a list one generation old, which is what it read before the cache
-    /// existed.
+    /// The materialized entry list; a concurrent query may see one generation old.
     pub fn entries_snapshot(&self) -> Arc<Vec<crate::indexer::walker::FileEntry>> {
         let current_gen = self.generation.load(Ordering::SeqCst);
-        // `parking_lot` locks are not poisoned, so there is no Result to unwrap
-        // here: the same shape as `cached_trie` above.
         {
             let cache = self.cached_entries.read();
             if let Some((cached_gen, entries)) = cache.as_ref()
@@ -837,7 +778,6 @@ impl MetadataStore {
             }
         }
 
-        // materialize
         let mut entries = Vec::with_capacity(self.arena.len());
         let mut path_index = HashMap::with_capacity(self.arena.len());
         for i in 0..self.arena.len() {
@@ -927,7 +867,6 @@ impl MetadataStore {
         map
     }
 
-    /// Assigned burst for a node, if it is an image that has been grouped.
     pub fn burst_for_node_id(&self, node_id: u64) -> Option<u64> {
         let idx = self.get_index_by_node_id(node_id)?;
         let bursts = self.bursts.read();
@@ -939,16 +878,14 @@ impl MetadataStore {
         if burst == 0 { None } else { Some(burst) }
     }
 
-    /// Assigned burst for a path. The hash lookup is the same one search
-    /// already uses for metadata, so collapsing results stays O(results).
+    /// Assigned burst for a path (O(1) hash lookup).
     pub fn burst_for_path(&self, path: &Path) -> Option<u64> {
         let idx = self.find_path_index(path)?;
         let node_id = self.arena.node(idx).node_id;
         self.burst_for_node_id(node_id)
     }
 
-    /// Drops a stale burst assignment while a changed image waits for a new
-    /// perceptual hash/backfill pass.
+    /// Drops a stale burst while a changed image awaits a new hash.
     pub fn clear_burst_for_path(&mut self, path: &Path) {
         let Some(idx) = self.find_path_index(path) else {
             return;
@@ -960,7 +897,6 @@ impl MetadataStore {
         }
     }
 
-    /// Applies burst assignments returned by the database after a merge.
     pub fn apply_bursts(&mut self, updates: &[(PathBuf, u64)]) {
         let mut bursts = self.bursts.write();
         if bursts.is_none() {
@@ -1013,7 +949,6 @@ impl MetadataStore {
         self.arena.is_empty()
     }
 
-    // Accessors for search hot path
     pub fn node(&self, idx: u32) -> &Node {
         self.arena.node(idx)
     }
@@ -1192,8 +1127,7 @@ mod tests {
         let root = temp.dir.join("root");
         let store = temp.store();
         store.add(entry(&root, true));
-        // Same file names in every directory, and enough rows to force the
-        // path index to grow several times while loading.
+        // Repeated names, and enough rows to grow the path index several times.
         let names = ["index.js", "README.md", "notes.txt", "a.png"];
         let mut paths = vec![root.clone()];
         for d in 0..30 {

@@ -8,7 +8,6 @@ use kensaku_core::config::KensakuConfig;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-/// How often `--wait`/`--follow` poll the daemon.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 /// How long `--wait` gives a requested crawl to actually begin.
 const START_GRACE: Duration = Duration::from_secs(8);
@@ -123,7 +122,6 @@ pub fn execute(cli: &Cli) -> CmdResult {
     }
 }
 
-/// Connects to (and if needed starts) the daemon.
 fn client(cli: &Cli) -> Result<Client, ApiError> {
     if cli.no_daemon {
         return Err(ApiError::new(
@@ -138,7 +136,7 @@ fn call(cli: &Cli, method: &str, params: Value) -> Result<Value, ApiError> {
     client(cli)?.call(method, params)
 }
 
-/// Calls `method`, printing JSON with `--json` or `human(result)` otherwise.
+/// Prints JSON with `--json`, else `human(result)`.
 fn call_print(cli: &Cli, method: &str, params: Value, human: impl FnOnce(&Value)) -> CmdResult {
     let value = call(cli, method, params)?;
     if cli.json {
@@ -469,10 +467,7 @@ fn require_yes(yes: bool, command: &str) -> CmdResult {
     }
 }
 
-/// Polls `get_status` until indexing is idle, printing progress.
-///
-/// `grace` is how long to wait for a just-requested crawl to begin before
-/// treating "idle" as "finished".
+/// Polls `get_status` until idle; `grace` is how long a requested crawl gets to begin before idle means finished.
 fn wait_for_idle(client: &Client, json_out: bool, grace: Duration) -> CmdResult {
     let started = Instant::now();
     let mut seen_running = false;

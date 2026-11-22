@@ -7,8 +7,7 @@ pub struct PdfExtractResult {
     pub page_count: usize,
     pub is_encrypted: bool,
     pub is_scanned: bool,
-    /// The PDF looked scanned but no OCR engine could run, so the text is a
-    /// placeholder that should be replaced once one can.
+    /// Scanned but no OCR engine could run; the placeholder text should be replaced later.
     pub ocr_unavailable: bool,
 }
 
@@ -53,14 +52,10 @@ pub fn extract_pdf(path: &Path, max_bytes: usize) -> Option<PdfExtractResult> {
             }
         }
 
-        // Fewer than 50 characters of real text across the whole document
-        // means scanned pages (often with a stamped page number or a scanner
-        // banner, which is why this is not "exactly empty").
+        // Under 50 chars (not exactly empty) to tolerate stamped page numbers or scanner banners.
         let is_scanned = page_count > 0 && full_text.trim().len() < 50;
         let mut ocr_unavailable = false;
-        // A single huge page can exceed the cap on its own (the per-page
-        // check only fires between pages); the assembled text is truncated
-        // here so the content budget holds for every PDF.
+        // A single huge page can exceed the cap; truncate the assembled text here.
         let mut text = if is_scanned && crate::indexer::extract::ocr_enabled() {
             let (ocr_text, unavailable) = extract_scanned_pdf_ocr(&doc, max_bytes);
             ocr_unavailable = unavailable;
@@ -106,11 +101,7 @@ pub fn extract_pdf(path: &Path, max_bytes: usize) -> Option<PdfExtractResult> {
     }
 }
 
-/// Most pages of a scanned PDF that get OCR'd. PP-OCR reads a page in about
-/// 0.15 s, so 20 pages fit comfortably in the extraction time budget; Indra
-/// takes up to about 0.75 s on a dense page, so 10; Tesseract takes about 1 s
-/// a page, so it stays at 6 to avoid timing out (a timed-out file is
-/// retried, so too many pages would retry forever).
+/// Max scanned pages to OCR, sized per engine to fit the time budget (timeouts retry forever).
 fn max_ocr_pages() -> usize {
     match crate::ocr::usable_engine() {
         crate::ocr::ACCURATE => 20,
@@ -119,17 +110,11 @@ fn max_ocr_pages() -> usize {
     }
 }
 
-/// OCRs the page images of a scanned PDF, in page order.
-///
-/// Returns the text (if any) and whether OCR was unavailable, so the caller
-/// can retry the file once an engine can run. Undecodable images (JPEG 2000,
-/// fax, JBIG2) are logged once per file rather than skipped silently.
+/// OCRs scanned page images in order; returns (text, ocr_unavailable) and logs undecodable images.
 fn extract_scanned_pdf_ocr(doc: &Document, max_bytes: usize) -> (Option<String>, bool) {
     use crate::ocr::OcrOutcome;
 
-    // One page in memory at a time. Decoding the whole document first meant a
-    // 20-page scan held ~3 GB before OCR started, which is where large scans
-    // fell over.
+    // One page in memory at a time; decoding all pages first held ~3 GB on 20-page scans.
     let mut skipped: Vec<String> = Vec::new();
     let mut collected = String::new();
     let mut unavailable = false;
@@ -146,8 +131,7 @@ fn extract_scanned_pdf_ocr(doc: &Document, max_bytes: usize) -> (Option<String>,
         |image, _reserved| {
             decoded_pages += 1;
             if collected.len() >= max_bytes || unavailable {
-                // Stop decoding further pages: the text budget is spent or
-                // the engine cannot run, and a retry happens either way.
+                // Text budget spent or engine unavailable; a retry happens either way.
                 return false;
             }
             match crate::indexer::extract::image::ocr_decoded_image(&image) {
@@ -188,7 +172,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A temp file that removes itself on drop.
     struct Fixture(PathBuf);
 
     impl Drop for Fixture {
@@ -210,14 +193,11 @@ mod tests {
         ))
     }
 
-    /// Builds and saves a PDF with one page per text. Empty page text
-    /// produces a page with no text operators (viewed as "scanned").
+    /// Builds a PDF with one page per text; empty text makes a "scanned" page.
     fn pdf_fixture(tag: &str, page_texts: &[&str]) -> Fixture {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
-        // lopdf's text collection only runs when /F1 Tf resolves to a font
-        // in the page resources, so every page carries the same minimal
-        // Helvetica resource.
+        // lopdf only collects text when /F1 resolves to a font in page resources.
         let font_id = doc.add_object(dictionary! {
             "Type" => "Font",
             "Subtype" => "Type1",
@@ -292,15 +272,12 @@ mod tests {
         let result = extract_pdf(&fx.0, 1_000_000).expect("scanned pdf still returns a result");
         assert!(result.is_scanned);
         assert_eq!(result.page_count, 1);
-        // With no OCR engine available on this host the placeholder stands in;
-        // the real replacement happens when an engine can run.
         assert!(!result.text.is_empty());
     }
 
     #[test]
     fn pdf_short_text_also_counts_as_scanned() {
-        // Below the 50-char threshold: scanner banner + page number class of
-        // content must not promise a "pure text" extraction.
+        // Below the 50-char threshold.
         let fx = pdf_fixture("pdf-banner", &["Page 3"]);
         let result = extract_pdf(&fx.0, 1_000_000).expect("pdf extracts");
         assert!(result.is_scanned);

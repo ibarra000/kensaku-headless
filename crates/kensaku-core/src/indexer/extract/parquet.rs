@@ -1,8 +1,5 @@
-//! Parquet extraction, like `pandas.head`: the column names and types from the
-//! footer, then the first rows. Only the pages those rows need are decoded, so
-//! a multi-gigabyte file costs about as much as a small one.
-//!
-//! Rows use the same `column = "value"` shape as CSV so one search works on both.
+//! Parquet extraction: schema plus the first rows (only needed pages are decoded),
+//! in the same `column = "value"` shape as CSV.
 
 use std::fs::File;
 use std::path::Path;
@@ -13,7 +10,7 @@ use parquet::schema::types::Type;
 
 use super::delimited::clip_to_char_boundary;
 
-/// Extracts the column summary and up to `head_rows` rows, at most `max_bytes`.
+/// Extracts the column summary and up to `head_rows` rows, capped at `max_bytes`.
 pub fn extract_parquet(path: &Path, max_bytes: usize, head_rows: usize) -> Option<String> {
     let reader = SerializedFileReader::new(File::open(path).ok()?).ok()?;
     let file_meta = reader.metadata().file_metadata();

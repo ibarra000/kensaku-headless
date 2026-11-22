@@ -1,9 +1,5 @@
-//! Deterministic natural-language intent compilation.
-//!
-//! Small, local, explainable rules map common phrasings ("latest resume",
-//! "screenshots from last week", "big videos in Projects") onto the existing
-//! query grammar plus an explicit sort. No model, no network, no silent
-//! rewrites: every emitted filter is returned as a removable chip.
+//! Deterministic natural-language intent compilation into the query grammar;
+//! every emitted filter is returned as a removable chip.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -14,17 +10,15 @@ pub struct InterpretationChip {
     /// "type" | "time" | "size" | "sort" | "place"
     pub kind: String,
     pub label: String,
-    /// The filter token appended to the query, e.g. `type:image`.
+    /// Filter token appended to the query, e.g. `type:image`.
     pub raw: String,
-    /// The words in the user's input that produced this chip.
+    /// Input words that produced this chip.
     pub source: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Intent {
-    /// Query with intent phrases removed and filters appended.
     pub query: String,
-    /// Explicit sort requested by language, if any.
     pub sort: Option<String>,
     pub chips: Vec<InterpretationChip>,
 }
@@ -51,16 +45,13 @@ fn take(
     }
 }
 
-/// Compiles natural language into the existing query grammar.
 pub fn compile(raw: &str) -> Intent {
     compile_with_aliases(raw, &[])
 }
 
-/// Compiles natural language, expanding personal vocabulary aliases into an
-/// OR-regex term (e.g. `resume` → `re:"(?i)(resume|cv)"`).
+/// Like [`compile`], expanding vocabulary aliases into an OR-regex term.
 pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Intent {
-    // Explicit grammar is authoritative: never reinterpret a query that
-    // already contains a filter token.
+    // Explicit filter tokens are authoritative; never reinterpret them.
     let has_explicit_filter = raw
         .split_whitespace()
         .any(|t| t.contains(':') && !t.starts_with("http") && !t.starts_with("https"));
@@ -71,7 +62,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
     let mut sort: Option<String> = None;
 
     if !has_explicit_filter {
-        // --- Sort words -------------------------------------------------
         for (pat, order, label) in [
             (r"(?i)\b(?:latest|newest|most recent)\b", "newest", "Newest"),
             (r"(?i)\boldest\b", "oldest", "Oldest"),
@@ -96,7 +86,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Time windows ----------------------------------------------
         for (pat, filter, label) in [
             (r"(?i)\btoday\b", "modified:<1d", "Modified: today"),
             (
@@ -133,9 +122,7 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Time travel: weekday and "N days ago" ---------------------
-        // "last Tuesday" is the most recent Tuesday before today. "N days ago"
-        // is that day. Both become a one-day window and a removable chip.
+        // "last Tuesday" / "N days ago" become one-day windows.
         for (pat, days_fn, label) in [
             (
                 r"(?i)\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
@@ -169,7 +156,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Size -------------------------------------------------------
         if let Ok(re) =
             Regex::new(r"(?i)\b(?:under|less than|smaller than)\s+(\d+(?:\.\d+)?)\s*(kb|mb|gb)\b")
             && let Some(c) = re.captures(&work)
@@ -225,7 +211,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Visual search intent --------------------------------------
         for pat in [r"(?i)\b(?:visual search|search visually for|visually)\b"] {
             if let Ok(re) = Regex::new(pat)
                 && re.is_match(&work)
@@ -246,7 +231,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Media / document nouns ------------------------------------
         for (pat, filter, label) in [
             (
                 r"(?i)\b(?:screenshots?|images?|photos?|pictures?)\b",
@@ -305,11 +289,9 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
             }
         }
 
-        // --- Place ------------------------------------------------------
         if let Ok(re) = Regex::new(
             r"(?i)\bin\s+(?:my\s+)?(projects|downloads|documents|desktop|pictures|videos|music|work)\b",
         ) {
-            // --- Personal vocabulary ----------------------------------
             for (term, expansions) in aliases {
                 let term = term.trim();
                 if term.is_empty() {
@@ -367,7 +349,6 @@ pub fn compile_with_aliases(raw: &str, aliases: &[(String, Vec<String>)]) -> Int
         };
     }
 
-    // Drop connective filler left behind once the intent words are removed.
     if let Ok(re) = Regex::new(r"(?i)\b(?:from|the|a|an|my|me|show|find|get|give|all|some|of)\b") {
         work = re.replace_all(&work, " ").to_string();
     }
@@ -441,19 +422,18 @@ mod tests {
     }
 }
 
-/// Today's weekday as 0=Monday..6=Sunday, from the system clock (UTC is
-/// accurate enough for a one-day window).
+/// Today's weekday, 0=Monday (UTC is close enough for a one-day window).
 fn chrono_weekday_today() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() / 86_400)
         .unwrap_or(0);
-    // 1970-01-01 was a Thursday (index 3 when Monday is 0).
+    // 1970-01-01 was a Thursday.
     ((days + 3) % 7) as u32
 }
 
-/// Days back from today to the most recent given weekday, never today itself.
+/// Days back to the most recent `name` weekday, never today.
 fn weekday_days_back(name: &str, today: u32) -> Option<u32> {
     let target = match name.to_ascii_lowercase().as_str() {
         "monday" => 0,
@@ -469,7 +449,6 @@ fn weekday_days_back(name: &str, today: u32) -> Option<u32> {
     Some(if back == 0 { 7 } else { back })
 }
 
-/// "N days ago" is N days back, with a floor of one day.
 fn days_ago_days(n: &str, _today: u32) -> Option<u32> {
     let n: u32 = n.parse().ok()?;
     (1..=365).contains(&n).then_some(n)
@@ -481,11 +460,8 @@ mod time_travel_tests {
 
     #[test]
     fn last_weekday_is_never_today() {
-        // Thursday (3) asking for "last Thursday" must go back a full week.
         assert_eq!(weekday_days_back("thursday", 3), Some(7));
-        // Thursday asking for "last Monday" is three days back.
         assert_eq!(weekday_days_back("monday", 3), Some(3));
-        // Monday asking for "last Sunday" is one day back.
         assert_eq!(weekday_days_back("sunday", 0), Some(1));
         assert_eq!(weekday_days_back("noday", 0), None);
     }

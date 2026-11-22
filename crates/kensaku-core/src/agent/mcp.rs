@@ -1,13 +1,5 @@
-//! Model Context Protocol server over stdio.
-//!
-//! Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout. **stdout is
-//! reserved for protocol messages**; diagnostics go to stderr.
-//!
-//! When the `kensaku` daemon is running the session forwards searches and state
-//! reads to it and never opens SQLite, Tantivy or the embedding table here.
-//! Without a daemon the read-only local index is used as a fallback. The only
-//! write-capable tool (`reindex`) is disabled unless `mcp_allow_reindex` is
-//! explicitly enabled in config.
+//! MCP server: newline-delimited JSON-RPC 2.0 on stdio; stdout is protocol-only, logs go to stderr.
+//! Forwards to the daemon when running, else a read-only local index; `reindex` needs `mcp_allow_reindex`.
 
 use super::{AgentSession, HeadlessIndex, compose_query_scoped, now_unix_secs, truncate_chars};
 use crate::config::KensakuConfig;
@@ -26,21 +18,14 @@ const INVALID_PARAMS: i64 = -32602;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 const MAX_PAGE_SIZE: usize = 50;
-/// Result offsets are capped alongside the 10k exhaustive result cap. A cursor
-/// beyond this point starts from scratch instead of materialising another
-/// 10k-page in memory.
+/// Offset cap matching the 10k exhaustive cap; beyond it, cursors restart instead of materialising another page.
 const MAX_OFFSET: usize = 10_000;
 const SNIPPET_CHARS: usize = 100;
 const SEARCH_TOKEN_BUDGET: usize = 1_500;
 
 /// Serves MCP over stdin/stdout until EOF.
 pub fn serve() -> Result<(), String> {
-    // A missing index is not fatal: `initialize` must still answer, and tool
-    // calls return a clear "no index" error until `kensaku setup` has built one.
-    //
-    // Prefer the daemon: it owns the only writer and already has the index
-    // hot. Only fall back to the local read-only open when ping fails. The
-    // ping is intentionally lightweight (no dir walk or DB load).
+    // Prefer the daemon (sole writer, index hot); a missing index is not fatal since `initialize` must answer.
     let daemon_ready = crate::daemon::request("ping", json!({})).is_ok();
     let local = if daemon_ready {
         None
@@ -111,10 +96,7 @@ pub fn handle_request(index: Option<&HeadlessIndex>, request: &Value) -> Option<
     handle_request_session(&session, request, reindex_enabled)
 }
 
-/// Handles one decoded JSON-RPC message for a daemon or local session.
-///
-/// Returns `None` for notifications (no reply is allowed). A `None` backend
-/// keeps `initialize` usable while tool calls fail with a helpful message.
+/// Handles one JSON-RPC message; `None` for notifications.
 pub fn handle_request_session(
     session: &AgentSession<'_>,
     request: &Value,
@@ -133,7 +115,6 @@ pub fn handle_request_session(
         return id.map(|id| error_response(id, INVALID_REQUEST, "Invalid Request: missing method"));
     };
 
-    // Notifications never get a reply (includes `notifications/initialized`).
     if method.starts_with("notifications/") {
         return None;
     }
@@ -385,9 +366,9 @@ fn tool_definitions(reindex_enabled: bool, visual_available: bool) -> Vec<Value>
 
 #[derive(Debug)]
 enum ToolFailure {
-    /// Protocol-level invalid arguments (mapped to JSON-RPC -32602).
+    /// JSON-RPC -32602.
     Invalid(String),
-    /// Tool ran but failed (returned as a tool result with `isError`).
+    /// Returned as a tool result with `isError`.
     Execution(String),
 }
 
@@ -524,9 +505,7 @@ fn tool_regex_search(session: &AgentSession<'_>, args: &Value) -> Result<Value, 
         .map_err(|e| ToolFailure::Invalid(format!("Invalid params: invalid regex: {}", e)))?;
 
     let mode = parse_mode(args)?;
-    // The lexer ends an unquoted value at the first whitespace, so a pattern
-    // containing a space was split into a regex plus separate terms and the
-    // caller silently got an AND of something they did not ask for.
+    // Quote the pattern: the lexer ends an unquoted value at whitespace.
     let composed = format!(
         "re:\"{}\"",
         pattern.replace('\\', "\\\\").replace('"', "\\\"")
@@ -539,9 +518,7 @@ fn tool_regex_search(session: &AgentSession<'_>, args: &Value) -> Result<Value, 
     Ok(payload)
 }
 
-/// Best-effort literal for centering regex snippets. Alternations such as
-/// `needle|omega` yield `needle`; symbolic patterns yield no snippet instead
-/// of a misleading window.
+/// Literal for centering regex snippets (first alternation branch); `None` for symbolic patterns.
 fn regex_snippet_literal(pattern: &str) -> Option<String> {
     pattern.split('|').find_map(|part| {
         let literal = part.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-');
@@ -564,7 +541,6 @@ fn run_search(
     let cursor = parse_cursor(args)?;
     let offset = match cursor {
         Cursor::Offset(offset) => offset,
-        // Keyset cursors only exist for exhaustive pages past the offset cap.
         Cursor::Path(_) if mode != "exhaustive" => {
             return Err(ToolFailure::Invalid(
                 "Invalid params: keyset cursor requires mode:exhaustive".to_string(),
@@ -585,11 +561,7 @@ fn run_search(
     let ext = optional_string(args, "ext")?;
     let modified_after = optional_string(args, "modified_after")?;
 
-    // Agent-scope enforcement (read-only scoping per root): intersect the
-    // requested path with the configured roots, or default to their union.
-    // The policy fails closed, and caller-supplied `in:` scopes are rejected
-    // when they fall outside the roots (the parser ORs includes together, so
-    // appending roots alone would let a caller widen the search).
+    // Policy fails closed; caller `in:` scopes outside the roots are rejected since includes are OR'd.
     let policy = session.policy().map_err(ToolFailure::Execution)?;
     policy
         .validate_query_scope(base_query)
@@ -609,10 +581,7 @@ fn run_search(
         .search_page(&composed, page_size, offset)
         .map_err(ToolFailure::Execution)?;
 
-    // Defense in depth: even a scoped query is filtered by the policy before
-    // any path is returned to the model.
-    // Ranked results already applied the offset in the dispatcher.
-    // Exhaustive mode intentionally ignores the display limit, so slice here.
+    // Defense in depth: filter by policy before returning paths. Exhaustive mode ignores the display limit, so slice here.
     let page: Vec<&crate::search::SearchResult> = if response.mode == "exhaustive" {
         response
             .results
@@ -673,8 +642,7 @@ fn run_search(
     let has_more = consumed < response.total;
     let cursor_limit_reached = has_more && consumed >= MAX_OFFSET;
     let next_cursor = if cursor_limit_reached {
-        // Switch to keyset pagination: the next page starts after the last
-        // path of this page instead of materialising another 10k offset.
+        // Keyset pagination: next page starts after this page's last path.
         page.last()
             .map(|result| Value::String(encode_path_cursor(&result.path)))
             .unwrap_or(Value::Null)
@@ -698,8 +666,7 @@ fn run_search(
     }))
 }
 
-/// Exhaustive keyset page: matches strictly after `start_after`. The cap
-/// applies per window, so arbitrarily large result sets stay reachable.
+/// Exhaustive keyset page after `start_after`; the cap applies per window.
 fn run_search_keyset(
     session: &AgentSession<'_>,
     args: &Value,
@@ -789,8 +756,7 @@ fn run_search_keyset(
     Ok(json!({
         "results": results,
         "returned": returned,
-        // With a keyset the total is relative to the window: an honest lower
-        // bound, not the whole set.
+        // With a keyset the total is a lower bound for the window.
         "total": response.total,
         "total_is_lower_bound": response.total >= MAX_OFFSET,
         "mode": "exhaustive",
@@ -811,10 +777,7 @@ fn tool_read_snippet(session: &AgentSession<'_>, args: &Value) -> Result<Value, 
         .filter(|path| !path.is_empty())
         .ok_or_else(|| ToolFailure::Invalid("Invalid params: 'path' is required".to_string()))?;
 
-    // Scope enforcement applies to direct reads too, and secret-bearing files
-    // stay unreadable even when the whole tree is in scope. The policy fails
-    // closed, and the path must also be part of the index: a direct read must
-    // never become an arbitrary-file reader for files the indexer skipped.
+    // Scope + denylist apply to direct reads, and the path must be indexed (no arbitrary-file reads).
     let policy = session.policy().map_err(ToolFailure::Execution)?;
     if !policy.read_allowed(path) {
         return Err(ToolFailure::Invalid(
@@ -846,9 +809,7 @@ fn tool_read_snippet(session: &AgentSession<'_>, args: &Value) -> Result<Value, 
             })?,
     };
 
-    // In daemon mode the daemon is the single source of truth. Never fall
-    // back to a local read when it rejects the request: that would turn a
-    // policy denial into a file read in this process.
+    // Never fall back to a local read when the daemon rejects: that would bypass its policy denial.
     if session.is_daemon() {
         let value = crate::daemon::request(
             "read_snippet",
@@ -913,8 +874,7 @@ fn tool_similar_images(session: &AgentSession<'_>, args: &Value) -> Result<Value
         .ok_or_else(|| ToolFailure::Invalid("Invalid params: 'path' is required".to_string()))?;
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    // The source image is read to compute its embedding, so it is subject to
-    // the same scope and denylist as any other direct read.
+    // The source image is a direct read, so scope and denylist apply.
     let policy = session.policy().map_err(ToolFailure::Execution)?;
     if !policy.read_allowed(path) {
         return Err(ToolFailure::Invalid(
@@ -985,8 +945,7 @@ fn encode_cursor(offset: usize) -> String {
     format!("k1-{:x}", offset)
 }
 
-/// Keyset cursor v2: hex of the last path, so exhaustive pages past the 10k
-/// offset cap stay reachable. Paths are opaque bytes; hex is unambiguous.
+/// Keyset cursor v2: hex of the last path (paths are opaque bytes).
 fn encode_path_cursor(path: &str) -> String {
     let mut out = String::with_capacity(2 * path.len() + 3);
     out.push_str("k2-");
@@ -1072,10 +1031,8 @@ pub fn extract_text(path: &Path) -> Option<String> {
     }
 }
 
-/// Returns `(line_start, line_end, text, truncated)` for a snippet centered on
-/// the first case-insensitive `query` match, capped at `max_tokens * 4` chars.
-///
-/// Line numbers are 1-based and relative to the full extracted text.
+/// Returns `(line_start, line_end, text, truncated)` centered on the first case-insensitive match,
+/// capped at `max_tokens * 4` chars; lines are 1-based in the full text.
 pub fn read_snippet_window(
     text: &str,
     query: Option<&str>,
@@ -1090,8 +1047,6 @@ pub fn read_snippet_window(
         .unwrap_or(0)
         .min(text.len());
 
-    // Keep a little context before the match, then fill the rest of the budget
-    // after it.
     let mut start = match_byte.saturating_sub(cap_chars / 4);
     while start > 0 && !text.is_char_boundary(start) {
         start -= 1;
@@ -1402,8 +1357,7 @@ mod tests {
     #[test]
     fn index_state_separates_units_model_from_active_model() {
         let fixture = fixture("model-ids");
-        // Simulate vectors written with a different model id than the one the
-        // process will embed new queries with.
+        // Vectors written with a different model id than the query embedder.
         {
             let db = MetadataDb::open_in_dir(&fixture.dir).expect("open metadata db");
             db.insert_unit(1, 0, 10, 42, &vec![0i8; crate::embed::EMBEDDING_DIM])
@@ -1665,7 +1619,6 @@ mod tests {
         );
         assert!(decode_cursor("k2-abc").is_err(), "odd hex rejected");
         assert!(decode_cursor("k2-zzzz").is_err(), "non-hex rejected");
-        // A keyset cursor outside exhaustive mode is rejected.
         let error = run_search(
             &AgentSession::None,
             &json!({"cursor": cursor}),
@@ -1797,7 +1750,6 @@ mod tests {
             "similar_images must be listed in tools/list"
         );
 
-        // Missing required 'path' parameter returns INVALID_PARAMS
         let call_resp = call(&fixture, "similar_images", json!({}));
         assert_eq!(call_resp["error"]["code"], INVALID_PARAMS);
     }

@@ -3,7 +3,6 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use rayon::prelude::*;
 
-/// Computes a 64-bit character presence bitmask for fast prefiltering.
 pub fn compute_char_mask(text: &str) -> u64 {
     let mut mask = 0u64;
     for ch in text.chars() {
@@ -23,8 +22,7 @@ pub fn compute_char_mask(text: &str) -> u64 {
     mask
 }
 
-/// Scores one entry for a parsed pattern. Callers provide the matcher and
-/// scratch buffer so parallel workers can keep their own state.
+/// Callers supply matcher and scratch so parallel workers keep their own state.
 fn score_entry(
     pattern: &Pattern,
     matcher: &mut Matcher,
@@ -33,7 +31,6 @@ fn score_entry(
     query_mask: u64,
     match_path: bool,
 ) -> Option<u32> {
-    // Char-bloom prefilter: 64-bit letter mask per name.
     if !match_path && (entry.char_bloom & query_mask) != query_mask {
         return None;
     }
@@ -80,9 +77,7 @@ impl FuzzySearcher {
         let query_mask = compute_char_mask(trimmed);
         let match_path = trimmed.contains('/') || trimmed.contains('\\');
 
-        // Large candidate sets (1M-file corpora) are scored across the rayon
-        // pool; small ones stay sequential so a keystroke never pays
-        // scheduling overhead.
+        // Parallel only for large sets so a keystroke never pays scheduling overhead.
         const PARALLEL_THRESHOLD: usize = 20_000;
         let mut scored_indices: Vec<(usize, u32)> = if candidate_indices.len() >= PARALLEL_THRESHOLD
         {
@@ -120,7 +115,6 @@ impl FuzzySearcher {
             scored
         };
 
-        // Top-k heap/selection using select_nth_unstable: O(N) instead of O(N log N)
         if scored_indices.len() > limit {
             scored_indices.select_nth_unstable_by(limit, |a, b| b.1.cmp(&a.1));
             scored_indices.truncate(limit);
@@ -135,8 +129,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// (query, expected file) pairs used by the ranking tests. The expected
-    /// value is matched against the entry path suffix.
+    /// (query, expected path suffix) pairs.
     const CASES: &[(&str, &str)] = &[
         ("cargo", "Cargo.toml"),
         ("app", "App.tsx"),
@@ -146,9 +139,7 @@ mod tests {
         ("settings", "settings.json"),
     ];
 
-    /// Builds an entry from a repo-relative path. The display name mirrors the
-    /// relative path, so the name-based char-bloom prefilter sees the same
-    /// characters as the path that nucleo scores.
+    /// Name mirrors the relative path so the char-bloom prefilter sees path chars.
     fn entry(relative: &str) -> FileEntry {
         let path = PathBuf::from(relative);
         let extension =
@@ -222,8 +213,7 @@ mod tests {
 
     #[test]
     fn gibberish_query_does_not_match_fixture_file_names() {
-        // #177 was reported as filename noise, and fuzzy is the tier that runs
-        // before the semantic one. A random-letter query must not match names.
+        // #177: a random-letter query must not match names.
         let entries = fixture();
         let candidates: Vec<usize> = (0..entries.len()).collect();
         let mut searcher = FuzzySearcher::new();
@@ -248,14 +238,12 @@ mod tests {
             let expected_idx = index_of(&entries, expected);
             let query_mask = compute_char_mask(query);
 
-            // The expected file must pass the char-bloom prefilter ...
             assert_eq!(
                 entries[expected_idx].char_bloom & query_mask,
                 query_mask,
                 "query {query:?}: {expected} fails the char-bloom prefilter"
             );
 
-            // ... and therefore survive into the search results.
             let results = searcher.search(query, &entries, &candidates, 50);
             assert!(
                 results.iter().any(|&(idx, _)| idx == expected_idx),
@@ -270,8 +258,6 @@ mod tests {
         let candidates: Vec<usize> = (0..entries.len()).collect();
         let mut searcher = FuzzySearcher::new();
 
-        // Reference scan without the prefilter: every entry the matcher would
-        // accept is expected to survive the char-bloom check and reach scoring.
         let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
         let mut buf = Vec::new();
 

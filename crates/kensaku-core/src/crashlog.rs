@@ -1,36 +1,25 @@
-//! Minimal local crash log.
-//!
-//! Panics and recoverable errors are appended to `<config_dir>/crash.log` so
-//! users can report a failure without attaching a debugger. Logging is strictly
-//! best-effort: a read-only or missing config directory must never turn a
-//! recoverable problem into a new panic.
+//! Best-effort local crash log at `<config_dir>/crash.log`; logging must never
+//! itself panic.
 
 use crate::config::KensakuConfig;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Rotate once the active log would grow past this size.
 const MAX_BYTES: u64 = 256 * 1024;
 
-/// `tail` never reads more than this many bytes from the end of the file.
 const TAIL_READ_BYTES: u64 = 32 * 1024;
 
 const FILE_NAME: &str = "crash.log";
 
-/// Milestones go to their own file. A "crash log" that also carries routine
-/// startup lines is misleading in bug reports, and the doctor check cannot
-/// tell a clean start from a real failure when both land in the same file.
+/// Milestones go to a separate file so the crash log holds only failures.
 const INFO_FILE_NAME: &str = "kensaku.log";
 
-/// Absolute path of the active crash log.
-///
-/// Exposed so the doctor check can point the user at the file.
 pub fn path() -> PathBuf {
     KensakuConfig::config_dir().join(FILE_NAME)
 }
 
-/// Absolute path of the milestone log (non-failure startup and progress lines).
+/// Milestone log path (non-failure lines).
 pub fn info_path() -> PathBuf {
     KensakuConfig::config_dir().join(INFO_FILE_NAME)
 }
@@ -48,7 +37,6 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Extracts the human-readable panic payload.
 fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
     if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_string()
@@ -59,8 +47,7 @@ fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
     }
 }
 
-/// True for the panic the std print macros raise when the output stream is
-/// gone. Not an application fault, so it must not become a crash-log entry.
+/// Panic from std print macros on a closed stream; not an app fault.
 fn is_broken_pipe(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("failed printing to stdout")
@@ -69,20 +56,12 @@ fn is_broken_pipe(message: &str) -> bool {
         || lower.contains("broken pipe")
 }
 
-/// Installs the process-wide panic hook.
-///
-/// Must be called once, as early as possible in `run()`, before the config is
-/// loaded: a panic in startup code is exactly what this log is for. The
-/// previous hook is still invoked, so the default stderr output is preserved.
+/// Installs the panic hook; call once, before config load. Chains the previous hook.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
 
     std::panic::set_hook(Box::new(move |info| {
-        // A closed stdout/stderr is not a crash in Kensaku: it means the
-        // terminal that launched the app went away, or a GUI process has no
-        // console. Recording it made the Health page report a failure on a
-        // perfectly healthy install, permanently, because the entry never
-        // ages out.
+        // A closed stdout/stderr is not a crash; recording it would flag healthy installs forever.
         let message = panic_message(info);
         if is_broken_pipe(&message) {
             previous(info);
@@ -103,8 +82,7 @@ pub fn install_panic_hook() {
 
         let mut entry = format!("[{}] {} {}\n", now_unix_secs(), location, message);
 
-        // Only pay for a backtrace when the user asked for one; a forced
-        // capture is expensive and very large on some platforms.
+        // Backtraces are expensive; capture only when requested.
         if let Some(value) = std::env::var_os("RUST_BACKTRACE")
             && value.to_string_lossy() != "0"
         {
@@ -116,7 +94,6 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Appends one already-formatted entry, rotating first when needed.
 fn append_line(path: &Path, entry: &str) {
     if path
         .parent()
@@ -136,9 +113,7 @@ fn append_line(path: &Path, entry: &str) {
     }
 }
 
-/// Moves the active log to `crash.log.1` when appending `incoming` bytes would
-/// cross [`MAX_BYTES`]. The previous `.1` is removed first, so at most two files
-/// (256 KiB + the newest entry) are ever kept.
+/// Rotates to `crash.log.1` before crossing [`MAX_BYTES`]; at most two files are kept.
 fn rotate_if_needed(path: &Path, incoming: u64) {
     let len = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     if len == 0 || len.saturating_add(incoming) <= MAX_BYTES {
@@ -150,13 +125,11 @@ fn rotate_if_needed(path: &Path, incoming: u64) {
     let _ = std::fs::rename(path, &rotated);
 }
 
-/// Returns the last `limit` non-empty lines of the active crash log.
 pub fn tail(limit: usize) -> Vec<String> {
     tail_from(&path(), limit)
 }
 
-/// Reads at most [`TAIL_READ_BYTES`] from the end of `path` and returns the last
-/// `limit` non-empty lines in file order (oldest first).
+/// Last `limit` non-empty lines (oldest first), reading at most [`TAIL_READ_BYTES`].
 fn tail_from(path: &Path, limit: usize) -> Vec<String> {
     if limit == 0 {
         return Vec::new();
@@ -168,8 +141,7 @@ fn tail_from(path: &Path, limit: usize) -> Vec<String> {
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let start = len.saturating_sub(TAIL_READ_BYTES);
 
-    // When the read window starts mid-line, discard that partial line instead
-    // of returning a mangled entry.
+    // Drop a partial first line when the window starts mid-line.
     let mut starts_mid_line = false;
     if start > 0 {
         let mut previous_byte = [0u8; 1];
@@ -206,15 +178,11 @@ fn tail_from(path: &Path, limit: usize) -> Vec<String> {
         .collect()
 }
 
-/// Records a recoverable error in the crash log.
 pub fn record_error(context: &str, err: &str) {
     record_error_at(&path(), context, err);
 }
 
-/// Records a non-fatal startup/progress milestone.
-///
-/// Deliberately written to [`INFO_FILE_NAME`], not the crash log: milestones
-/// are not failures and must never be reported as one.
+/// Records a non-fatal milestone to [`INFO_FILE_NAME`], never the crash log.
 pub fn info(message: &str) {
     append_line(
         &info_path(),
@@ -222,11 +190,7 @@ pub fn info(message: &str) {
     );
 }
 
-/// Whether a crash-log line describes a failure rather than a milestone.
-///
-/// Builds before 1.0.16 wrote `INFO` lines into `crash.log`, so an existing
-/// log can hold both. The timestamp prefix is bracketed and comes first;
-/// everything after it is the message.
+/// Pre-1.0.16 logs mix `INFO` lines in; the message follows the bracketed timestamp.
 fn is_failure_line(line: &str) -> bool {
     let body = match line.find(']') {
         Some(end) => line[end + 1..].trim_start(),
@@ -235,10 +199,7 @@ fn is_failure_line(line: &str) -> bool {
     !body.starts_with("INFO ")
 }
 
-/// The most recent line in the crash log that describes an actual failure.
-///
-/// `None` means the log holds no failures, which is the normal state on a
-/// healthy install even when the file exists.
+/// Most recent failure line; `None` is normal on a healthy install.
 pub fn last_failure() -> Option<String> {
     last_failure_at(&path())
 }
@@ -261,8 +222,7 @@ fn record_error_at(path: &Path, context: &str, err: &str) {
 mod tests {
     use super::*;
 
-    /// Fresh directory + crash.log path. The returned directory is removed by
-    /// [`cleanup`] once the test is done.
+    /// Fresh directory + crash.log path; remove with [`cleanup`].
     fn temp_log(tag: &str) -> (PathBuf, PathBuf) {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -288,8 +248,7 @@ mod tests {
         let (dir, log) = temp_log("rotate");
         let chunk = "x".repeat(8 * 1024);
 
-        // 40 * ~8 KiB is comfortably over the 256 KiB cap, so at least one
-        // rotation must happen.
+        // Comfortably over the 256 KiB cap.
         for _ in 0..40 {
             append_line(&log, &format!("{}\n", chunk));
         }
@@ -336,7 +295,6 @@ mod tests {
         for i in 0..5 {
             append_line(&log, &format!("line-{}\n", i));
         }
-        // Blank lines are ignored by `tail`.
         append_line(&log, "\n");
 
         assert_eq!(tail_from(&log, 2), vec!["line-3", "line-4"]);
@@ -353,7 +311,6 @@ mod tests {
     fn tail_only_reads_the_end_of_large_logs() {
         let (dir, log) = temp_log("tail-large");
 
-        // ~64 KiB of short lines, well past the 32 KiB read window.
         for i in 0..4096 {
             append_line(&log, &format!("entry-{}\n", i));
         }
@@ -386,7 +343,6 @@ mod tests {
 
     #[test]
     fn broken_pipe_panics_are_not_crashes() {
-        // Exactly the entry that showed up in the field.
         assert!(super::is_broken_pipe(
             "failed printing to stderr: The pipe is being closed. (os error 232)"
         ));
@@ -398,8 +354,6 @@ mod tests {
     fn info_milestones_are_not_failures() {
         let (dir, log) = temp_log("info-classify");
 
-        // Two healthy startups, exactly the shape that made the doctor warn
-        // on a clean install.
         append_line(&log, "[1793822770] INFO starting kensaku 1.0.15 (windows x86_64)\n");
         append_line(
             &log,
@@ -421,15 +375,12 @@ mod tests {
         append_line(&log, "[100] ERROR indexer: disk full\n");
         append_line(&log, "[101] INFO config loaded: setup_complete=true\n");
 
-        // The failure is not the last line, but it is still the thing the
-        // user needs to see.
         assert_eq!(
             last_failure_at(&log).as_deref(),
             Some("[100] ERROR indexer: disk full")
         );
 
-        // A panic entry has no ERROR marker, only a location after the
-        // timestamp. It must still count.
+        // A panic entry has no ERROR marker but must still count.
         append_line(&log, "[102] src/indexer/mod.rs:41:9 index out of bounds\n");
         assert_eq!(
             last_failure_at(&log).as_deref(),

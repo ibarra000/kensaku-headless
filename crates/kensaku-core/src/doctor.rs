@@ -1,7 +1,4 @@
-//! On-demand health checks for the running application.
-//!
-//! Every check is best-effort: failures are reported as statuses instead of
-//! being propagated as errors, and no check is allowed to panic.
+//! On-demand health checks; failures become statuses, never errors or panics.
 
 use crate::indexer::IndexerManager;
 use crate::config::{ExternalExtractor, KensakuConfig};
@@ -18,29 +15,19 @@ pub struct DoctorCheck {
     pub status: String,
     pub detail: String,
     pub fix: Option<String>,
-    /// What the UI can do about it, when there is something to do.
-    ///
-    /// The fix text alone was a dead end: the models row said "download model
-    /// files in AI & Semantic", and that panel has no download button, so the
-    /// instruction could not be followed. A check that knows how to repair
-    /// itself should offer that, not a sentence to copy.
+    /// Repair the client can perform for this check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<DoctorAction>,
 }
 
-/// A repair the Health page can perform, named rather than described.
-///
-/// String kinds rather than a closed enum in the JSON: the frontend switches on
-/// them, and an unknown kind is simply not rendered as a button, so an older UI
-/// talking to a newer backend degrades instead of breaking.
+/// A named repair; unknown kinds are simply not rendered by older clients.
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorAction {
-    /// Stable identifier: `download-models`, `download-ocr-pack`,
-    /// `restart-watcher`, `cleanup-storage`, `open-crash-log`,
-    /// `reindex`, `open-settings`.
+    /// `download-models`, `download-ocr-pack`, `restart-watcher`, `cleanup-storage`,
+    /// `open-crash-log`, `reindex`, `open-settings`.
     pub kind: String,
     pub label: String,
-    /// Settings section to open, for `open-settings`.
+    /// Section to open, for `open-settings`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
 }
@@ -88,7 +75,6 @@ fn check(id: &str, label: &str, status: &str, detail: String, fix: Option<String
     }
 }
 
-/// Attaches a repair action to a check.
 fn with_action(mut check: DoctorCheck, action: DoctorAction) -> DoctorCheck {
     check.action = Some(action);
     check
@@ -111,7 +97,7 @@ fn is_locked(error: &str) -> bool {
     lower.contains("locked") || lower.contains("busy")
 }
 
-/// Recursively sums regular files below `dir`. Symlinks are not followed.
+/// Recursively sums regular files; symlinks are not followed.
 fn dir_size_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -237,18 +223,14 @@ fn check_crash_log() -> DoctorCheck {
 
     let path = crate::crashlog::path();
 
-    // Only actual failures count. The file existing is not evidence of a
-    // crash: older builds logged routine startup milestones here, and a
-    // healthy install could show a warning whose text was the app's own
-    // "config loaded" line.
+    // Only real failures count; the file existing is not evidence of a crash.
     match crate::crashlog::last_failure() {
         Some(line) => with_action(
             warn(
                 ID,
                 LABEL,
                 line,
-                // The fix is intentionally just the path: the UI opens it in
-                // the user's editor rather than interpreting the crash.
+                // The fix is just the path; the client opens it.
                 Some(path.display().to_string()),
             ),
             DoctorAction::new("open-crash-log", "Open log"),
@@ -401,7 +383,6 @@ fn check_full_text_index(nodes: usize) -> DoctorCheck {
     ok(ID, LABEL, detail)
 }
 
-/// What the data folder holds, and whether past upgrades left anything behind.
 fn check_storage() -> DoctorCheck {
     let info = crate::maintenance::inventory();
     let mut parts = vec![format!("data folder {}", format_bytes(info.total_bytes))];
@@ -423,9 +404,7 @@ fn check_storage() -> DoctorCheck {
     }
     let detail = parts.join(" · ");
 
-    // Old schema backups and staged installers are pure accumulation. They are
-    // pruned at startup, but say so rather than leaving a user to wonder why
-    // their profile keeps growing.
+    // Stale backups/installers are pruned at startup; still report them.
     if info.legacy_backups > 1 || info.update_temp_bytes > 0 {
         return with_action(
             warn("storage", "Data folder", detail, None),
@@ -435,9 +414,7 @@ fn check_storage() -> DoctorCheck {
     ok("storage", "Data folder", detail)
 }
 
-/// What the last crawl did, so "it indexes every time I open it" can be
-/// answered from the Health tab rather than from output a release build never
-/// shows anyone.
+/// Summary of the last crawl.
 fn check_last_crawl() -> DoctorCheck {
     let Some(report) = crate::indexer::last_crawl_report() else {
         return ok(
@@ -461,9 +438,7 @@ fn check_last_crawl() -> DoctorCheck {
             report.abandoned
         ));
     }
-    // When the OCR state differs from the recorded one, every image and
-    // scanned PDF is re-read. Saying so turns a mysterious multi-minute scan
-    // into a named cause.
+    // An OCR state change re-reads every image and scanned PDF; name the cause.
     if report.ocr_signature_stored.as_deref() != Some(report.ocr_signature_now.as_str()) {
         detail.push_str(&format!(
             " · OCR state {} -> {}",
@@ -475,8 +450,7 @@ fn check_last_crawl() -> DoctorCheck {
         ));
     }
 
-    // A launch that re-reads a large share of the corpus without a schema
-    // rebuild or an OCR change is the pattern worth flagging.
+    // Flag heavy re-reads not explained by a schema rebuild or OCR change.
     if is_heavy_scan(&report) {
         return warn(
             "last_crawl",
@@ -489,14 +463,7 @@ fn check_last_crawl() -> DoctorCheck {
     ok("last_crawl", "Last index scan", detail)
 }
 
-/// Whether a crawl re-read a large share of the corpus for no stated reason.
-///
-/// A first scan — or a crawl over an index that was just recreated — re-reads
-/// everything by definition, and those files are reported as new. That is
-/// expected, so it must not surface as a warning asking the user to file a
-/// bug: every fresh install would see one (#142, #146). Only files the index
-/// had already seen are worth flagging, and only when they are not explained
-/// by a content-index rebuild.
+/// Heavy re-read of previously seen files not explained by a rebuild; new files never count (#142, #146).
 fn is_heavy_scan(report: &crate::indexer::CrawlReport) -> bool {
     if report.walked == 0 || report.reason.starts_with("content index rebuilt") {
         return false;
@@ -537,10 +504,7 @@ fn check_semantic_index(units: usize) -> DoctorCheck {
         )
     };
 
-    // A fallback means the vectors are meaningless even though everything
-    // "works": the count is high, queries return results, and the ranking is
-    // noise. Reporting ok here is how a user concludes semantic search is fine
-    // while it is quietly useless.
+    // A fallback makes vectors meaningless even though search appears to work.
     if model.fallback_reason.is_some() {
         return warn(
             ID,
@@ -626,10 +590,7 @@ fn check_watcher(indexer: &IndexerManager) -> DoctorCheck {
         return ok(ID, LABEL, "Live filesystem watcher is running.".to_string());
     }
 
-    // A crawl stops the watcher for its duration and restarts it at the end,
-    // so this state is expected while a scan runs. Reporting it as a warning
-    // meant every Health check taken during the launch scan looked broken, and
-    // the suggested fix (reindex) would restart what was about to start anyway.
+    // A crawl stops the watcher for its duration, so this is expected mid-crawl.
     if indexer.is_crawling() {
         return ok(
             ID,
@@ -686,9 +647,7 @@ fn check_models() -> DoctorCheck {
     let total = status.artifacts.len();
 
     if status.ready {
-        // Presence is not proof: files that are present but unreadable leave
-        // the provider on the hashing fallback, and this row used to report ok
-        // anyway while the semantic row reported a fallback. Verify the load.
+        // Presence isn't proof: verify the files actually load.
         let dir = models::models_dir();
         let config = crate::config::KensakuConfig::load();
         match crate::embed::ModelRegistry::load_with_f32_reason_from_dir(
@@ -729,10 +688,7 @@ fn check_models() -> DoctorCheck {
             .map(|a| a.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        // Semantic search falls back to hashing when the real model is absent,
-        // which returns plausible-looking results ranked on worthless vectors.
-        // The row offers the download instead of telling the user to find a
-        // button that does not exist in the AI & Semantic panel.
+        // The hashing fallback returns plausible results on worthless vectors; offer the download.
         with_action(
             warn(
                 ID,
@@ -758,8 +714,7 @@ fn check_ocr() -> DoctorCheck {
         return ok(ID, LABEL, "OCR is turned off in Settings".to_string());
     }
     let status = crate::indexer::extract::image::ocr_status();
-    // The selected engine cannot run: say so instead of silently using
-    // another one.
+    // The selected engine cannot run: say so rather than silently using another.
     let selected_problem = match status.engine.as_str() {
         crate::ocr::INDRA => status.indra_problem.clone().map(|p| ("Indra OCR", p)),
         crate::ocr::ACCURATE => status.accurate_problem.clone().map(|p| ("PP-OCR", p)),
@@ -1004,7 +959,7 @@ fn check_external_extractors(
     ok(ID, LABEL, format!("{} enabled: {}", enabled, commands))
 }
 
-/// Runs every doctor check. Never panics; each check degrades to a status.
+/// Runs every check; never panics.
 pub fn run(indexer: &IndexerManager) -> DoctorReport {
     let config_dir = KensakuConfig::config_dir();
 
@@ -1136,8 +1091,7 @@ mod tests {
 
     #[test]
     fn first_scan_is_not_a_heavy_scan() {
-        // #142 / #146: every file is new, so the whole corpus is re-read by
-        // definition and the user must not be told to report a bug.
+        // #142 / #146: every file is new, so a full re-read is expected.
         let report = crawl(
             88_391,
             52_257,
@@ -1155,8 +1109,7 @@ mod tests {
 
     #[test]
     fn churn_over_known_files_is_a_heavy_scan() {
-        // Nothing new, yet most of the corpus was re-read: the pattern worth
-        // reporting.
+        // Nothing new, yet most of the corpus was re-read.
         let report = crawl(10_000, 9_000, 0, "0 new, 0 restamped");
         assert!(is_heavy_scan(&report));
     }
@@ -1180,8 +1133,7 @@ mod tests {
 
     #[test]
     fn a_mixed_scan_only_counts_the_unexplained_re_read() {
-        // 9,000 re-read, 8,500 of them new: 500 unexplained files out of
-        // 10,000 is ordinary churn, not a heavy scan.
+        // 500 unexplained of 10,000 is ordinary churn.
         let report = crawl(10_000, 9_000, 8_500, "8500 new, 0 restamped");
         assert!(!is_heavy_scan(&report));
     }

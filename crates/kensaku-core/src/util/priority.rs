@@ -1,25 +1,17 @@
-//! Best-effort background priority for crawler and extraction threads.
-//!
-//! Indexing must never fight typing. `balanced` and `eco` put the crawl thread
-//! and extraction workers into the OS idle/background class; `full` restores
-//! normal priority. Every
-//! syscall is advisory and failures are ignored, so unsupported sandboxes and
-//! permission-restricted environments still index correctly.
-//!
-//! Set `KENSAKU_NO_BG_PRIORITY=1` to disable the policy (useful for tests,
-//! profiling, and diagnosing slow crawls).
+//! Best-effort OS background priority for crawl/extraction threads; failures
+//! are ignored. `KENSAKU_NO_BG_PRIORITY=1` disables it.
 
 use crate::config::CrawlMode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BACKGROUND: AtomicBool = AtomicBool::new(true);
 
-/// Update policy without changing the calling UI/command thread's priority.
+/// Updates the policy without changing the calling thread's priority.
 pub fn set_mode(mode: CrawlMode) {
     BACKGROUND.store(mode.is_background(), Ordering::Relaxed);
 }
 
-/// Apply the current policy on an extraction worker, once per document.
+/// Applies the current policy on an extraction worker.
 pub fn apply_current() {
     let mode = if BACKGROUND.load(Ordering::Relaxed) {
         CrawlMode::Balanced
@@ -88,8 +80,7 @@ fn apply_platform(background: bool) {
 
 #[cfg(windows)]
 fn apply_platform(background: bool) {
-    // Background mode affects only this worker, including I/O priority.
-    // Applying a process priority class would also demote query threads.
+    // Thread-level only: a process priority class would also demote query threads.
     const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
     const THREAD_MODE_BACKGROUND_END: i32 = 0x0002_0000;
 

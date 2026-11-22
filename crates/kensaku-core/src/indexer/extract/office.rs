@@ -5,39 +5,21 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use zip::ZipArchive;
 
-/// Maximum uncompressed XML bytes read from one archive member.
-///
-/// A small zip can expand to gigabytes. The output and event budgets bound the
-/// text we keep and the parser work, but a single giant text node would still
-/// be buffered whole by quick-xml. Truncating the reader at this limit turns a
-/// decompression bomb into a normal truncated document.
+/// Max uncompressed XML bytes per archive member (zip-bomb guard).
 const MAX_XML_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Hard cap on XML events processed for one archive.
-///
-/// The output limit alone does not stop a crafted document: a file can contain
-/// millions of empty or zero-length elements that never add a byte to the
-/// output but still cost parser time. This is the budget that bounds the work.
+/// Hard cap on XML events per archive; bounds parser work on empty-element floods.
 const MAX_XML_EVENTS: usize = 2_000_000;
 
-/// Maximum shared strings retained while reading an XLSX.
-///
-/// Only the first 2,000 are ever emitted; the rest are kept in memory only
-/// because cells reference them by index. A crafted workbook can declare
-/// millions, so both the count and the total bytes are capped.
+/// Max shared strings kept (cells reference by index; crafted workbooks declare millions).
 const MAX_SHARED_STRINGS: usize = 20_000;
 const MAX_SHARED_STRING_BYTES: usize = 8 * 1024 * 1024;
 
-/// Returns true when the event budget is exhausted.
 fn budget_exhausted(events: usize) -> bool {
     events >= MAX_XML_EVENTS
 }
 
-/// Appends `text` to `out` without letting it grow past `limit` bytes.
-///
-/// quick-xml hands back a whole text node in one event, so checking the budget
-/// before `push_str` is not enough: a single 300 KB node overshot a 100-byte
-/// limit. Truncation stops on a UTF-8 boundary.
+/// Appends `text` without exceeding `limit`, truncating on a UTF-8 boundary.
 fn push_bounded(out: &mut String, text: &str, limit: usize) -> bool {
     if out.len() >= limit {
         return true;
@@ -56,12 +38,7 @@ fn push_bounded(out: &mut String, text: &str, limit: usize) -> bool {
     }
 }
 
-/// Decodes an XML reference event (`&amp;`, `&#233;`, ...) to text.
-///
-/// quick-xml 0.42 separates general references out of `Event::Text`, so
-/// extractors must handle them or "R&D" becomes unsearchable "RD". Unknown
-/// named entities (XLSX/DOCX sometimes invent their own) fall back to the
-/// raw `&name;` rather than silently dropping content.
+/// Decodes an XML reference (`&amp;`, `&#233;`); unknown entities stay raw.
 fn decoded_ref(r: &quick_xml::events::BytesRef<'_>) -> String {
     let raw = format!("&{};", r.as_ref());
     quick_xml::escape::unescape(&raw)
@@ -74,7 +51,6 @@ pub fn extract_docx(path: &Path, max_bytes: usize) -> Option<String> {
     let mut archive = ZipArchive::new(BufReader::new(file)).ok()?;
 
     let doc_file = archive.by_name("word/document.xml").ok()?;
-    // Stream XML directly instead of buffering entire document in memory
     let mut reader =
         Reader::from_reader(std::io::BufReader::new(doc_file.take(MAX_XML_INPUT_BYTES)));
     reader.config_mut().trim_text(true);
@@ -111,8 +87,6 @@ pub fn extract_docx(path: &Path, max_bytes: usize) -> Option<String> {
             }
             Ok(Event::Text(ref e)) => {
                 if in_text {
-                    // XML entities in raw text (&amp; &#233;) must be decoded
-                    // or "R&D report" can never match a search for "R&D".
                     push_bounded(&mut text_out, e.as_ref(), max_bytes);
                     text_out.push(' ');
                 }
@@ -146,13 +120,10 @@ pub fn extract_pptx(path: &Path, max_bytes: usize) -> Option<String> {
         .file_names()
         .filter_map(|r| r.ok())
         .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
-        // A crafted archive can declare an enormous number of slides; only the
-        // first thousand are ever useful and this keeps the vector bounded.
         .take(1_000)
         .map(|s| s.to_string())
         .collect();
 
-    // Sort slides numerically: slide1.xml, slide2.xml, ...
     slide_names.sort_by_key(|n| {
         n.strip_prefix("ppt/slides/slide")
             .and_then(|s| s.strip_suffix(".xml"))
@@ -237,7 +208,6 @@ pub fn extract_xlsx(path: &Path, max_bytes: usize) -> Option<String> {
     let file = File::open(path).ok()?;
     let mut archive = ZipArchive::new(BufReader::new(file)).ok()?;
 
-    // 1. Read shared strings if present
     let mut shared_strings = Vec::new();
     if let Ok(ss_file) = archive.by_name("xl/sharedStrings.xml") {
         let mut reader =
@@ -262,9 +232,7 @@ pub fn extract_xlsx(path: &Path, max_bytes: usize) -> Option<String> {
                     }
                     Ok(Event::End(ref e)) => {
                         if e.name().as_ref() == "t" && in_t {
-                            // One shared string per <t>: quick-xml 0.42
-                            // splits entity references into their own
-                            // events, so text must span them.
+                            // One string per <t>; entity refs arrive as separate events.
                             if shared_strings.len() < MAX_SHARED_STRINGS
                                 && shared_bytes < MAX_SHARED_STRING_BYTES
                             {
@@ -295,7 +263,6 @@ pub fn extract_xlsx(path: &Path, max_bytes: usize) -> Option<String> {
         }
     }
 
-    // 2. Read sheets
     let mut sheet_names: Vec<String> = archive
         .file_names()
         .filter_map(|r| r.ok())
@@ -306,7 +273,6 @@ pub fn extract_xlsx(path: &Path, max_bytes: usize) -> Option<String> {
 
     let mut text_out = String::new();
 
-    // If shared strings were extracted, include them as a summary
     if !shared_strings.is_empty() {
         for s in shared_strings.iter().take(2000) {
             if text_out.len() >= max_bytes {
@@ -317,7 +283,6 @@ pub fn extract_xlsx(path: &Path, max_bytes: usize) -> Option<String> {
         }
     }
 
-    // Also scan worksheet cells for inline strings or numbers
     let mut events = 0usize;
     for sheet_name in sheet_names.iter().take(10) {
         if text_out.len() >= max_bytes || budget_exhausted(events) {
@@ -514,7 +479,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Removes its file on drop so failed tests don't litter temp dirs.
     struct Fixture(PathBuf);
 
     impl Drop for Fixture {
@@ -536,7 +500,6 @@ mod tests {
         ))
     }
 
-    /// Builds a zip archive with the given (name, string) members.
     fn zip_fixture(tag: &str, members: &[(&str, &str)]) -> Fixture {
         let path = temp_path(tag);
         let file = File::create(&path).unwrap();
@@ -556,8 +519,7 @@ mod tests {
         Fixture(path)
     }
 
-    /// All five formats are (path, max_bytes) -> Option<String>; invalid
-    /// input must return None for every one of them, never panic.
+    /// Invalid input must return None for every extractor, never panic.
     type Extractor = fn(&Path, usize) -> Option<String>;
     const ALL_EXTRACTORS: &[(&str, Extractor)] = &[
         ("extract_docx", extract_docx),
@@ -592,10 +554,7 @@ mod tests {
             )],
         );
         let text = extract_docx(&fx.0, 10_000).expect("docx extracts");
-        // Runs and references arrive as separate event streams, so entity
-        // output is surrounded by the spaces the extractor adds between
-        // pieces; what matters is that every decoded piece is present and
-        // no raw entity leaks.
+        // Entities arrive as separate events, so pieces may be space-separated.
         assert!(text.contains("R"), "got: {text:?}");
         assert!(text.contains('&'), "entity must decode: {text:?}");
         assert!(
@@ -612,8 +571,7 @@ mod tests {
 
     #[test]
     fn docx_ignores_text_outside_runs() {
-        // Tempting failure mode: index all text nodes, so file metadata
-        // strings would pollute every match. Only w:t content is indexed.
+        // Only w:t content is indexed, not metadata strings.
         let fx = zip_fixture(
             "docx-outline",
             &[(
@@ -809,8 +767,7 @@ mod tests {
 
     #[test]
     fn pptx_slide_buffer_is_bounded() {
-        // A single slide with a huge text run used to be buffered whole before
-        // the total limit was checked. The per-slide cap must keep it bounded.
+        // The per-slide cap must bound a single huge text run.
         let repeated = "slide ".repeat(50_000);
         let body = format!("<a:p><a:t>{repeated}</a:t></a:p>");
         let fx = zip_fixture("pptx-budget", &[("ppt/slides/slide1.xml", &body)]);
@@ -824,8 +781,6 @@ mod tests {
 
     #[test]
     fn xlsx_shared_string_output_is_bounded() {
-        // A huge shared string must not be copied into the output past the
-        // budget, and must not make the extractor allocate the whole sheet.
         let repeated = "x".repeat(1_000_000);
         let body = format!("<sst><si><t>{repeated}</t></si></sst>");
         let fx = zip_fixture("xlsx-budget", &[("xl/sharedStrings.xml", &body)]);

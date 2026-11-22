@@ -1,9 +1,4 @@
-//! Optional accurate OCR pack.
-//!
-//! Tesseract stays the fast, always-available default. The accurate pack adds
-//! PaddleOCR PP-OCRv6 tiny (detector + recognizer + dictionary) behind the
-//! `accurate-ocr` Cargo feature. If the pack is not installed or the feature is
-//! disabled, callers fall back to Tesseract.
+//! Optional accurate OCR (PP-OCRv6 tiny, `accurate-ocr` feature); Tesseract is the fallback.
 
 use crate::config::KensakuConfig;
 use std::path::{Path, PathBuf};
@@ -11,35 +6,25 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const TESSERACT: &str = "tesseract";
 pub const ACCURATE: &str = "accurate";
-/// Indra OCR (see [`crate::ocr_indra`]).
 pub const INDRA: &str = "indra";
-/// No engine can run on this machine right now.
+/// No engine can run right now.
 pub const NONE: &str = "none";
 
-/// Bump whenever the text produced for the same image can change (engine
-/// fixes, decoding changes). A change re-queues every image and PDF once, so
-/// existing indexes pick up the fix without a manual rebuild.
-///
-/// - 2: PP-OCR keeps spaces between words; scanned PDFs are decoded properly.
+/// Bump when output for the same image can change; re-queues every image and PDF once.
 pub const OCR_REVISION: u32 = 2;
 
-/// Result of one OCR attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcrOutcome {
-    /// The engine ran and read text.
     Text(String),
-    /// The engine ran and found no text (a photo, a blank page, an
-    /// unreadable file). Final: retrying would give the same answer.
+    /// Ran and found no text. Final: retrying gives the same answer.
     NoText,
-    /// The engine could not run. Not final: the file must be retried once an
-    /// engine is usable.
+    /// Could not run. Not final: retry once an engine is usable.
     Unavailable,
 }
 
 static ENGINE: AtomicU8 = AtomicU8::new(0);
 
-/// Directory holding the optional PP-OCRv6 pack. `KENSAKU_OCR_PACK_DIR`
-/// overrides it (development and the real-model CI tests).
+/// PP-OCRv6 pack directory; `KENSAKU_OCR_PACK_DIR` overrides it.
 pub fn pack_dir() -> PathBuf {
     match std::env::var_os("KENSAKU_OCR_PACK_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -59,20 +44,16 @@ pub fn dict_path() -> PathBuf {
     pack_dir().join("dict.txt")
 }
 
-/// True when all three pack files exist at their expected sizes.
+/// All three pack files exist at their expected sizes.
 pub fn pack_present() -> bool {
-    // Size-checked, not merely present: a stale pack from an older version or
-    // a truncated download loads and then reads nothing, which is how #174 was
-    // reported. Reporting it as missing lets Download verify and replace it.
+    // Size-checked: stale or truncated packs load but read nothing (#174).
     crate::models::ocr_pack_present()
 }
 
-/// Cached self-test result. Reset after a pack download so a failure against
-/// the old files does not outlive the download that fixed them (#174).
+/// Cached self-test result; reset after a pack download (#174).
 #[cfg(feature = "accurate-ocr")]
 static SELF_TEST: parking_lot::Mutex<Option<Result<(), String>>> = parking_lot::Mutex::new(None);
 
-/// Drops the cached PP-OCR self-test so the next status check runs it again.
 pub fn reset_self_test() {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -80,12 +61,10 @@ pub fn reset_self_test() {
     }
 }
 
-/// True when the compiled binary has the accurate engine.
 pub fn accurate_compiled() -> bool {
     cfg!(feature = "accurate-ocr")
 }
 
-/// File name of the ONNX Runtime shared library on this platform.
 fn runtime_file_name() -> String {
     format!(
         "{}onnxruntime{}",
@@ -94,13 +73,8 @@ fn runtime_file_name() -> String {
     )
 }
 
-/// Where an installed Kensaku keeps the ONNX Runtime it ships, in the order
-/// they are tried. Release archives ship the library next to the `kensaku`
-/// binary; `../Resources` and `<prefix>/lib/kensaku/` cover packaged
-/// installs (app bundles, distro packages).
-///
-/// A system copy is never preferred: Windows ships an old, API-incompatible
-/// `onnxruntime.dll` in System32, and a distro package can be any version.
+/// Bundled ONNX Runtime locations in try order. Never prefer a system copy
+/// (Windows System32 ships an old, API-incompatible `onnxruntime.dll`).
 fn runtime_candidates(exe: &Path, file_name: &str) -> Vec<PathBuf> {
     let Some(dir) = exe.parent() else {
         return Vec::new();
@@ -111,8 +85,7 @@ fn runtime_candidates(exe: &Path, file_name: &str) -> Vec<PathBuf> {
         dir.join("../lib/kensaku").join(file_name),
         dir.join("../lib").join(file_name),
     ];
-    // Development and test layouts:
-    // target/debug/deps -> target/debug
+    // Dev/test layouts: target/debug/deps -> target/debug
     if let Some(parent) = dir.parent() {
         candidates.push(parent.join(file_name));
         // target/debug -> target
@@ -122,12 +95,10 @@ fn runtime_candidates(exe: &Path, file_name: &str) -> Vec<PathBuf> {
             candidates.push(grandparent.join("crates").join("kensaku-core").join(file_name));
         }
     }
-    // Also check standard configuration and model directories
     candidates.push(KensakuConfig::config_dir().join(file_name));
     candidates.push(KensakuConfig::config_dir().join("models").join(file_name));
 
-    // The standalone daemon (installed with the CLI, not inside the app) uses
-    // the copy the installed app shipped.
+    // The standalone daemon uses the copy the installed app shipped.
     if cfg!(target_os = "macos") {
         candidates
             .push(PathBuf::from("/Applications/kensaku.app/Contents/Resources").join(file_name));
@@ -137,7 +108,7 @@ fn runtime_candidates(exe: &Path, file_name: &str) -> Vec<PathBuf> {
     candidates
 }
 
-/// Outcome of the one-time runtime probe: `Ok(path)` or a reason.
+/// One-time runtime probe outcome: `Ok(path)` or a reason.
 #[cfg(feature = "accurate-ocr")]
 fn runtime_probe() -> &'static Result<String, String> {
     use std::sync::OnceLock;
@@ -166,9 +137,7 @@ fn runtime_probe() -> &'static Result<String, String> {
                 return Err(reason);
             }
         };
-        // `init_from` returns an error for a missing/incompatible library,
-        // but guard against a panic from a broken loader anyway. `ort::api()`
-        // then confirms the library exposes the API version `ort` needs.
+        // Guard against loader panics; `ort::api()` then checks the API version.
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ort::init_from(&path).map(|_| ()).map_err(|e| e.to_string())
         }))
@@ -194,7 +163,6 @@ fn runtime_probe() -> &'static Result<String, String> {
     })
 }
 
-/// Detailed error from the ONNX Runtime loader, if loading failed.
 pub fn runtime_error() -> Option<String> {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -206,8 +174,7 @@ pub fn runtime_error() -> Option<String> {
     }
 }
 
-/// True when the dynamic ONNX Runtime library can be loaded. Probed once per
-/// process: installing the library later requires a restart.
+/// Probed once per process; installing the library later needs a restart.
 pub fn runtime_loadable() -> bool {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -219,8 +186,7 @@ pub fn runtime_loadable() -> bool {
     }
 }
 
-/// Why the accurate engine cannot run, in words a user can act on, or `None`
-/// when it can.
+/// Why the accurate engine cannot run, or `None` when it can.
 pub fn accurate_problem() -> Option<String> {
     if !accurate_compiled() {
         return Some("PP-OCR is not part of this build".into());
@@ -238,20 +204,13 @@ pub fn accurate_problem() -> Option<String> {
     None
 }
 
-/// True when the accurate engine can actually run.
-///
-/// Requires the pack, a build with `accurate-ocr`, **and** a loadable
-/// `libonnxruntime`. When any of those is missing, callers use Tesseract.
+/// Needs the pack, an `accurate-ocr` build, and a loadable `libonnxruntime`.
 pub fn accurate_available() -> bool {
     accurate_compiled() && pack_present() && runtime_loadable() && self_test().is_ok()
 }
 
-/// The engine that will actually read images right now: the selected one
-/// when it can run, otherwise whichever other engine can, otherwise [`NONE`].
-///
-/// Selecting PP-OCR on a machine where it cannot run (no pack yet, Intel Mac)
-/// must not mean "no OCR" while Tesseract is sitting right there. Indra falls
-/// back to PP-OCR first, then Tesseract.
+/// Selected engine if it can run, else the next usable one (Indra -> PP-OCR ->
+/// Tesseract), else [`NONE`].
 pub fn usable_engine() -> &'static str {
     let tesseract = || crate::indexer::extract::image::tesseract_usable();
     if engine_name() == INDRA {
@@ -281,11 +240,9 @@ pub fn usable_engine() -> &'static str {
     }
 }
 
-/// Fingerprint of "what OCR would produce right now". When it differs from
-/// the one stored with the index, images and PDFs are re-read once.
+/// Fingerprint of OCR output; a change re-reads images and PDFs once.
 pub fn signature() -> String {
-    // The image-size cap is part of "what OCR would produce": raising it
-    // must re-read images that were skipped.
+    // The image-size cap is included so raising it re-reads skipped images.
     format!(
         "{}:{}:{}",
         usable_engine(),
@@ -294,10 +251,7 @@ pub fn signature() -> String {
     )
 }
 
-/// Updates the process-wide OCR backend from config.
-///
-/// Values other than `accurate` and `indra` (including the old `native`
-/// string) fall back to Tesseract.
+/// Values other than `accurate` and `indra` (including legacy `native`) mean Tesseract.
 pub fn set_engine(engine: &str) {
     let value = if engine.eq_ignore_ascii_case(ACCURATE) {
         1
@@ -317,12 +271,8 @@ pub fn engine_name() -> &'static str {
     }
 }
 
-/// PaddleOCR recognizers have one output class per dictionary line, plus the
-/// CTC blank at index 0, plus a final class for the space character. Paddle's
-/// own pipeline appends that space (`use_space_char=True`); the dictionary
-/// files do not contain it and `paddleocr_rs_onnx` does not add it. Without it
-/// every predicted space indexes past the end of the key list and is dropped,
-/// so "Open settings" is read as "Opensettings" and word search never matches.
+/// Appends the space class Paddle adds (`use_space_char=True`) but the dict files
+/// lack; without it every predicted space is dropped.
 pub fn keys_with_space(dict: &[u8]) -> Vec<u8> {
     let mut keys = dict.to_vec();
     while matches!(keys.last(), Some(b'\n' | b'\r')) {
@@ -338,10 +288,7 @@ pub fn keys_with_space(dict: &[u8]) -> Vec<u8> {
     keys
 }
 
-/// Reads an image with the accurate engine.
-///
-/// `Unavailable` when the engine cannot run (not selected, no pack, no
-/// runtime, model failed to load); the caller decides what to fall back to.
+/// `Unavailable` when the engine cannot run; the caller picks the fallback.
 pub fn extract_image_ocr(path: &Path) -> OcrOutcome {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -351,8 +298,7 @@ pub fn extract_image_ocr(path: &Path) -> OcrOutcome {
         let Some(engine) = accurate_engine() else {
             return OcrOutcome::Unavailable;
         };
-        // Budgeted: the decoded page is charged against the decode budget for
-        // as long as recognition holds it.
+        // The decoded page is charged against the decode budget while held.
         let Some((image, _reserved)) =
             crate::indexer::extract::image::decode_for_recognition(path)
         else {
@@ -367,7 +313,7 @@ pub fn extract_image_ocr(path: &Path) -> OcrOutcome {
     }
 }
 
-/// Reads an already-decoded image (scanned PDF pages) with the accurate engine.
+/// Reads an already-decoded image (scanned PDF pages).
 pub fn extract_decoded_image(image: &image::DynamicImage) -> OcrOutcome {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -417,8 +363,7 @@ fn recognize(engine: &paddleocr_rs_onnx::OcrEngine, image: &image::DynamicImage)
     }
 }
 
-/// Cached state of the accurate engine. `Unavailable` is sticky so a corrupt
-/// pack is probed once, not once per image.
+/// `Unavailable` is sticky so a corrupt pack is probed only once.
 #[cfg(feature = "accurate-ocr")]
 enum AccurateEngine {
     Uninitialized,
@@ -426,12 +371,8 @@ enum AccurateEngine {
     Unavailable,
 }
 
-/// The shared engine, loaded on first use.
-///
-/// The lock is held only while loading. Recognition runs outside it on a
-/// shared `Arc`: the engine is `Send + Sync` and keeps its own session pool,
-/// so several extraction workers can OCR at once instead of queueing behind
-/// one mutex (and timing out while they wait).
+/// Shared engine, loaded on first use; the lock covers loading only, so workers
+/// recognize concurrently.
 #[cfg(feature = "accurate-ocr")]
 fn accurate_engine() -> Option<std::sync::Arc<paddleocr_rs_onnx::OcrEngine>> {
     use paddleocr_rs_onnx::OcrEngine;
@@ -450,14 +391,11 @@ fn accurate_engine() -> Option<std::sync::Arc<paddleocr_rs_onnx::OcrEngine>> {
             std::fs::read(dict_path()),
         );
         let (Ok(det), Ok(rec), Ok(dict)) = files else {
-            // Pack disappeared between the presence check and the read: try
-            // again next time rather than going sticky-unavailable.
+            // Pack vanished mid-check: retry later rather than going sticky-unavailable.
             return None;
         };
         let keys = keys_with_space(&dict);
-        // `ort` panics (rather than returning an error) when the dynamic
-        // runtime cannot be loaded. Contain that here so the caller falls
-        // back instead of losing the file to a worker panic.
+        // `ort` panics when the runtime cannot load; contain it so the caller falls back.
         *guard = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             OcrEngine::new(&det, &rec, &keys)
         })) {
@@ -478,15 +416,12 @@ fn accurate_engine() -> Option<std::sync::Arc<paddleocr_rs_onnx::OcrEngine>> {
     }
 }
 
-/// A tiny image with known text, used to prove the engine actually reads.
+/// Known-text image proving the engine actually reads.
 pub(crate) const SELF_TEST_IMAGE: &[u8] = include_bytes!("../tests/fixtures/ocr-ui-text/001.png");
 pub(crate) const SELF_TEST_EXPECTED: &str = "open settings";
 
-/// Runs the accurate engine once on a known image and checks the words come
-/// back, spaces included. Cached once it has run against a present pack, so
-/// status checks stay cheap. This is what "ready" means in the UI: files on
-/// disk prove nothing, a correct read does. [`reset_self_test`] clears the
-/// cache after a download, so a retry does not need a restart.
+/// Reads a known image and checks the words (spaces included); cached once run
+/// against a present pack. [`reset_self_test`] clears it.
 pub fn self_test() -> Result<(), String> {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -540,8 +475,7 @@ mod tests {
         assert_eq!(engine_name(), ACCURATE);
         set_engine("Indra");
         assert_eq!(engine_name(), INDRA);
-        // The retired `native` value must fall back to Tesseract rather than
-        // claiming a backend that does not exist.
+        // Legacy `native` falls back to Tesseract.
         set_engine("native");
         assert_eq!(engine_name(), TESSERACT);
         set_engine(TESSERACT);
@@ -549,7 +483,7 @@ mod tests {
 
     #[test]
     fn keys_gain_exactly_one_trailing_space_entry() {
-        // Trailing newline, no trailing newline, CRLF: always one " " line.
+        // Trailing newline, none, CRLF: always one " " line.
         for dict in [&b"a\nb\n"[..], b"a\nb", b"a\r\nb\r\n"] {
             let keys = keys_with_space(dict);
             let text = String::from_utf8(keys).unwrap();
@@ -557,7 +491,6 @@ mod tests {
             assert_eq!(lines.len(), 3, "{dict:?} -> {lines:?}");
             assert_eq!(*lines.last().unwrap(), " ");
         }
-        // Idempotent: a dictionary that already ends with the space entry.
         assert_eq!(keys_with_space(b"a\nb\n "), b"a\nb\n ".to_vec());
         assert_eq!(keys_with_space(&keys_with_space(b"a\n")), b"a\n ".to_vec());
     }
@@ -567,8 +500,7 @@ mod tests {
         let name = runtime_file_name();
         let exe = Path::new("/opt/app/bin/kensaku");
         let candidates = runtime_candidates(exe, &name);
-        // Windows (next to the exe), macOS (Contents/Resources), Linux
-        // packages (<prefix>/lib/kensaku).
+        // Next to the exe, Contents/Resources, <prefix>/lib/kensaku.
         assert_eq!(candidates[0], Path::new("/opt/app/bin").join(&name));
         assert!(candidates.contains(&Path::new("/opt/app/bin/../Resources").join(&name)));
         assert!(candidates.contains(&Path::new("/opt/app/bin/../lib/kensaku").join(&name)));
@@ -576,12 +508,10 @@ mod tests {
 
     #[test]
     fn pack_presence_requires_all_three_files() {
-        // The real config dir should not be touched by this test.
         let dir = std::env::temp_dir().join(format!("kensaku-ocr-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // pack_dir() is config-based, so only the path helpers are exercised
-        // here; presence is covered by the ignored real-pack test.
+        // Presence is covered by the ignored real-pack test.
         assert!(det_path().ends_with("det.onnx"));
         assert!(rec_path().ends_with("rec.onnx"));
         assert!(dict_path().ends_with("dict.txt"));
@@ -591,16 +521,12 @@ mod tests {
     #[cfg(feature = "accurate-ocr")]
     #[test]
     fn runtime_probe_is_panic_free() {
-        // Whether or not libonnxruntime is installed, probing must answer
-        // instead of panicking (the old path panicked inside `ort`).
+        // Probing must answer, not panic, whether or not the runtime is installed.
         let _ = runtime_loadable();
         let _ = accurate_available();
     }
 
-    /// The whole app path, not just the crate: engine selection, runtime
-    /// probe, self-test, image OCR, and a scanned PDF through the real
-    /// extractor. Run by `.github/workflows/ocr.yml` on Linux, macOS and
-    /// Windows with the real pack and ONNX Runtime.
+    /// End-to-end with the real pack and runtime (run by `.github/workflows/ocr.yml`).
     #[cfg(feature = "accurate-ocr")]
     #[test]
     #[ignore = "requires KENSAKU_OCR_PACK_DIR and ORT_DYLIB_PATH"]
@@ -628,8 +554,7 @@ mod tests {
             other => panic!("image OCR: {other:?}"),
         }
 
-        // A scanned PDF: one page, no text layer, raw Flate RGB rows (the
-        // layout the old extractor could never decode).
+        // Scanned PDF: one page, no text layer, raw Flate RGB rows.
         let rgb = image::open(&fixture).unwrap().to_rgb8();
         let (w, h) = rgb.dimensions();
         let mut encoder =
@@ -727,9 +652,7 @@ mod tests {
     #[test]
     #[ignore = "requires KENSAKU_OCR_PACK_DIR; runs the 104-image UI-text fixture"]
     fn real_pack_ui_text_recall() {
-        // Word boundaries are part of the result: search tokenizes on them,
-        // so "Opensettings" for "Open settings" is a miss, not a hit. (The
-        // old normalizer stripped spaces and hid exactly that bug.)
+        // Keep spaces: search tokenizes on word boundaries.
         fn normalize(text: &str) -> String {
             text.chars()
                 .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })

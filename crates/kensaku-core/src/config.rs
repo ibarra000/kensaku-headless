@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alias {
-    /// Word the user types.
+    /// Word to expand.
     pub term: String,
-    /// Other spellings that should match the same thing.
+    /// Other spellings that match the same thing.
     pub expansions: Vec<String>,
 }
 
@@ -19,8 +19,7 @@ pub struct SavedSearch {
     pub sort: Option<String>,
 }
 
-/// Opt-in external text extractor. Commands are executed directly (never
-/// through a shell), with a cleared environment and a hard timeout.
+/// Opt-in external text extractor, run directly (no shell) with a cleared env and timeout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalExtractor {
     /// Shown in extraction metadata and warnings.
@@ -28,23 +27,21 @@ pub struct ExternalExtractor {
     /// Lowercase extensions without the dot, e.g. `["stl", "obj"]`.
     #[serde(default)]
     pub extensions: Vec<String>,
-    /// Optional MIME selectors, e.g. `["model/*"]`. Matched alongside
-    /// `extensions` when either matches. `mime_types` is accepted as an alias.
+    /// MIME selectors, e.g. `["model/*"]` (alias `mime_types`); either list may match.
     #[serde(default, alias = "mime_types")]
     pub mime: Vec<String>,
-    /// Absolute path to an executable file. PATH lookup is never used.
+    /// Absolute executable path; PATH lookup is never used.
     pub command: String,
-    /// Individual arguments. `{path}` is replaced with the file path; if no
-    /// argument contains it, the path is appended as the last argument.
+    /// `{path}` is replaced with the file path, else the path is appended.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Wall-clock limit; clamped to 100..=7000 ms by the runner.
+    /// Wall-clock limit; clamped to 100..=7000 ms.
     #[serde(default = "default_extractor_timeout_ms")]
     pub timeout_ms: u64,
-    /// Maximum captured stdout; clamped to 1 KiB..=4 MiB.
+    /// Max captured stdout; clamped to 1 KiB..=4 MiB.
     #[serde(default = "default_extractor_output_bytes")]
     pub max_output_bytes: u64,
-    /// External commands never run unless this is explicitly true.
+    /// External commands never run unless this is true.
     #[serde(default)]
     pub enabled: bool,
 }
@@ -84,7 +81,6 @@ pub enum CrawlMode {
 }
 
 impl CrawlMode {
-    /// True when indexing should run at background priority.
     pub fn is_background(self) -> bool {
         !matches!(self, Self::Full)
     }
@@ -106,125 +102,97 @@ pub struct KensakuConfig {
     pub shortcut: String,
     pub max_results: usize,
     pub is_setup_complete: bool,
-    /// True once the *first* full crawl finished. `is_setup_complete` in the
-    /// command layer is the AND of this and `is_setup_complete` (configured).
+    /// True once the first full crawl finished.
     #[serde(default)]
     pub first_scan_done: bool,
-    /// Skip files and directories whose name starts with `.` (hidden entries).
-    /// Enabled by default; users can opt into indexing hidden files.
+    /// Skip dot-prefixed (hidden) files and directories. Default true.
     #[serde(default = "default_true")]
     pub skip_hidden: bool,
     #[serde(default = "default_true")]
     pub semantic_enabled: bool,
     #[serde(default = "default_semantic_model")]
     pub semantic_model: String,
-    /// Keep the static embedding table in f32 for one release. The default is
-    /// the compact i8 table; this switch exists for quality comparisons and
-    /// rollback without rebuilding.
+    /// Keep the static embedding table in f32 instead of i8.
     #[serde(default)]
     pub semantic_f32_table: bool,
-    /// Background indexing policy. `balanced` uses idle priority; `eco` also
-    /// paces work on battery. `full` stays at normal priority.
+    /// `balanced` uses idle priority; `eco` also paces on battery; `full` is normal priority.
     #[serde(default)]
     pub crawl_mode: CrawlMode,
-    /// Pause background crawling without stopping the watcher. Renames and
-    /// deletes still apply while paused.
+    /// Pause crawling; the watcher still applies renames and deletes.
     #[serde(default)]
     pub pause_indexing: bool,
-    /// Allow MCP agents to call the opt-in `reindex` write tool. Disabled by
-    /// default; read-only tools are always available.
+    /// Allow MCP agents to call the `reindex` write tool.
     #[serde(default)]
     pub mcp_allow_reindex: bool,
     #[serde(default = "default_true")]
     pub ocr_enabled: bool,
-    /// Legacy (desktop app): stored for compatibility, ignored headless.
+    /// Legacy; ignored.
     #[serde(default = "default_app_mode")]
     pub app_mode: String,
-    /// Legacy (desktop app): stored for compatibility, ignored headless.
+    /// Legacy; ignored.
     #[serde(default = "default_true")]
     pub close_to_background: bool,
-    /// OCR backend: `tesseract` (fast default), `accurate` (optional
-    /// PP-OCRv6 pack) or `indra` (optional Indra OCR pack). Indra falls back
-    /// to PP-OCR, PP-OCR to Tesseract, when a pack is absent.
+    /// `tesseract`, `accurate` (PP-OCRv6) or `indra`; falls back Indra -> PP-OCR -> Tesseract.
     #[serde(default = "default_ocr_engine")]
     pub ocr_engine: String,
-    /// Opt-in external extractors keyed by extension or MIME type. Empty by
-    /// default: no external command ever runs without explicit configuration.
+    /// External extractors; none run without explicit configuration.
     #[serde(default)]
     pub extractors: Vec<ExternalExtractor>,
-    /// Skip OCR on images larger than this many bytes (0 = no limit). Useful
-    /// for speeding up the first scan on screenshot-heavy corpora. Default 0.
+    /// Skip OCR on images larger than this many bytes (0 = no limit).
     #[serde(default)]
     pub ocr_max_image_bytes: u64,
-    /// Tesseract language codes, e.g. `["eng", "hin"]`. Empty means "use
-    /// English when installed". Previously Tesseract always ran as English
-    /// because `-l` was never passed, whatever the user had installed.
+    /// Tesseract language codes, e.g. `["eng", "hin"]`; empty = English if installed.
     #[serde(default)]
     pub ocr_languages: Vec<String>,
-    /// Beta visual-search model pack. This only gates the Beta settings tab and
-    /// model download; it is intentionally not wired into search yet.
+    /// Beta visual model pack; not wired into search yet.
     #[serde(default)]
     pub visual_search_beta_enabled: bool,
-    /// Content depth for large documents. `quick` (default) keeps the historic
-    /// caps; `balanced` and `deep` raise them for book/manual-sized files.
-    /// Stored as a string so unknown values fall back to `quick`.
+    /// `quick` (default), `balanced` or `deep`; unknown values mean `quick`.
     #[serde(default = "default_content_depth")]
     pub content_depth: String,
-    /// Maximum file size (in MB) that gets its text extracted. Files above
-    /// this are indexed by name/filters only. Default 20.
+    /// Max file size (MB) for text extraction; larger files are name-only. Default 20.
     #[serde(default = "default_content_max_file_size_mb")]
     pub content_max_file_size_mb: u64,
-    /// Maximum extracted text (in bytes) per document. Default 1 MB.
+    /// Max extracted text bytes per document. Default 1 MB.
     #[serde(default = "default_content_max_text_bytes")]
     pub content_max_text_bytes: usize,
-    /// Data rows indexed per CSV/TSV/Parquet file, after the header (like
-    /// `pandas.head`). Larger files are sampled, not read in full. Default 200.
+    /// Data rows indexed per CSV/TSV/Parquet file after the header. Default 200.
     #[serde(default = "default_content_csv_head_rows")]
     pub content_csv_head_rows: usize,
-    /// Maximum semantic units (chunks) per document. Default 20.
+    /// Max semantic units (chunks) per document. Default 20.
     #[serde(default = "default_content_max_semantic_units")]
     pub content_max_semantic_units: usize,
-    /// Agent-surface scope: when non-empty, MCP/HTTP/CLI results and snippet
-    /// reads are restricted to these roots (read-only scoping per root).
+    /// When non-empty, agent-surface results and reads are restricted to these roots.
     #[serde(default)]
     pub agent_scoped_roots: Vec<String>,
-    /// Include files matched by `.gitignore` / `.cursorignore` in the index.
-    /// Default false: ignore files are honored so agents see the same tree
-    /// developers do ("ignore parity").
+    /// Index files matched by `.gitignore` / `.cursorignore`. Default false.
     #[serde(default)]
     pub include_ignored: bool,
-    /// Directories (watched roots or any folder below them) indexed by file
-    /// name and path only: no text extraction, OCR or embeddings. Everything
-    /// else keeps the default "name + content" behavior, so an empty list
-    /// leaves existing setups unchanged.
+    /// Directories indexed by name and path only (no extraction, OCR or embeddings).
     #[serde(default)]
     pub name_only_dirs: Vec<PathBuf>,
-    /// Persisted UI theme ("light" or "dark"). Legacy "paper" / "void"
-    /// configs are migrated at load (v5).
+    /// "light" or "dark" (legacy "paper"/"void" migrated in v5).
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// UI language code ("en", "zh", …) or None for auto-detect from the
-    /// system locale. Added in v7.
+    /// Language code ("en", "zh", …) or None to auto-detect.
     #[serde(default)]
     pub language: Option<String>,
-    /// Personal vocabulary: `term` matches any of `expansions`.</arg_value>
+    /// Personal vocabulary: `term` matches any of `expansions`.
     #[serde(default = "default_aliases")]
     pub aliases: Vec<Alias>,
-    /// Saved queries shown on the home screen.
+    /// Saved queries.
     #[serde(default)]
     pub saved_searches: Vec<SavedSearch>,
-    /// Pinned file paths shown on the home screen.
+    /// Pinned file paths.
     #[serde(default)]
     pub pins: Vec<String>,
-    /// Show generated thumbnails on result cards. On by default; off shows
-    /// the type icon only (no thumbnail generation at all).
+    /// Generate thumbnails. Default true.
     #[serde(default = "default_true")]
     pub show_thumbnails: bool,
-    /// Result layout: "grid" (cards, default) or "list" (one row per file).
+    /// "grid" (default) or "list".
     #[serde(default = "default_results_view")]
     pub results_view: String,
-    /// Automatically check for updates on startup and in the background.
-    /// Enabled by default; users can opt out in settings.
+    /// Check for updates automatically. Default true.
     #[serde(default = "default_true")]
     pub auto_update: bool,
     /// Config schema version, used for one-time migrations.
@@ -236,8 +204,7 @@ fn default_true() -> bool {
     true
 }
 
-/// PP-OCR ships with every installer and is verified at runtime; where it
-/// cannot run (Intel Macs) the engine selection falls back to Tesseract.
+/// PP-OCR; engine selection falls back to Tesseract where it cannot run.
 fn default_ocr_engine() -> String {
     "accurate".to_string()
 }
@@ -246,14 +213,7 @@ fn default_app_mode() -> String {
     "launcher".to_string()
 }
 
-/// Pure core of [`KensakuConfig::config_dir`], kept out of the env-dependent
-/// wrapper so tests can exercise every precedence branch without mutating
-/// process env vars (which parallel test threads share).
-///
-/// - `env`: `KENSAKU_DATA_DIR` when set, `None` otherwise.
-/// - `exe_path`: `current_exe()` when resolvable, `None` otherwise.
-/// - `platform_default`: `dirs::config_dir()`, allowed to be `None` on
-///   exotic platforms, in which case a relative fallback is used.
+/// Pure core of [`KensakuConfig::config_dir`], testable without mutating process env.
 fn resolve_config_dir(
     env: Option<&std::ffi::OsStr>,
     exe_path: Option<&std::path::Path>,
@@ -291,44 +251,31 @@ fn default_content_depth() -> String {
     "balanced".to_string()
 }
 
-/// Books and manuals are often 20-100 MB because of their images while their
-/// text is small; below this cap they get full-text search, above it they
-/// are still findable by name.
+/// Books/manuals are often large from images but small in text.
 fn default_content_max_file_size_mb() -> u64 {
     100
 }
 
-/// About 2,000 pages of text. Extraction of ~6 MB measured 3.8 s, and the
-/// extraction timeout scales with file size.
+/// About 2,000 pages of text.
 fn default_content_max_text_bytes() -> usize {
     4_000_000
 }
 
-/// Rows past this are not searchable by value; the header and column types
-/// still are. Raise it to trade indexing time for deeper row search.
+/// Later rows aren't searchable by value; header and column types still are.
 fn default_content_csv_head_rows() -> usize {
     200
 }
 
-/// 48 overlapping chunks covers roughly the first 9,000 words. Only large
-/// documents use more than one; each chunk is 256 bytes of vector.
+/// 48 overlapping chunks covers roughly the first 9,000 words.
 fn default_content_max_semantic_units() -> usize {
     48
 }
 
 fn default_theme() -> String {
-    // The config default and the inline pre-paint script in index.html must
-    // agree on this: if both storage and matchMedia fail, the first frame
-    // paints dark. Fresh installs otherwise follow the OS (see useTheme.ts
-    // and #72); the frontend owns first-run resolution.
     "dark".to_string()
 }
 
-/// Canonicalizes a theme name to "light" or "dark".
-///
-/// Accepts the current names and the pre-1.1 names ("paper" / "void").
-/// Anything unrecognized falls back to the default, which keeps a
-/// hand-edited config from wedging the app.
+/// Canonicalizes to "light" or "dark" (accepts "paper"/"void"); unknown -> default.
 pub fn normalize_theme(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "light" | "paper" => "light".to_string(),
@@ -337,7 +284,7 @@ pub fn normalize_theme(raw: &str) -> String {
     }
 }
 
-/// Canonicalizes a language code to a supported value, or None for auto-detect.
+/// Supported language code, or None for auto-detect.
 pub fn normalize_language(raw: &str) -> Option<String> {
     let v = raw.trim().to_ascii_lowercase();
     match v.as_str() {
@@ -353,7 +300,7 @@ pub const CURRENT_CONFIG_VERSION: u32 = 7;
 const DEFAULT_EXCLUDED_EXTENSIONS: &[&str] = &[
     // Binaries and build artifacts
     "exe", "dll", "so", "dylib", "bin", "o", "a", "lib", "class", "pyc", "pyo",
-    // Secrets / credentials (`key` is also Apple Keynote; private keys win)
+    // Secrets (`key` is also Apple Keynote; private keys win)
     "pem", "key", "pfx", "p12", "crt", "cer",
     // Databases
     "db", "sqlite", "sqlite3",
@@ -363,8 +310,7 @@ const DEFAULT_EXCLUDED_EXTENSIONS: &[&str] = &[
     "min.js", "min.css", "map",
 ];
 
-/// Extensions excluded by default up to config v5 that are now findable by
-/// name (v6 removes them from existing configs).
+/// Excluded up to v5, findable by name since v6.
 const NAME_SEARCHABLE_SINCE_V6: &[&str] = &[
     "psd", "ai", "sketch", "fig", "mp3", "mp4", "wav", "avi", "mov", "mkv", "flac", "ogg",
     "webm", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "tgz", "ttf", "otf", "woff",
@@ -437,14 +383,7 @@ impl Default for KensakuConfig {
         .map(String::from)
         .collect();
 
-        // Documents (PDF/Office/EPUB) and images are indexed via text extraction
-        // and OCR, so they are deliberately NOT excluded by default.
-        //
-        // Media, archives, fonts and design files are not excluded either:
-        // their contents are never read (they are not indexable types), but a
-        // search for "vacation.mp4" or "invoice.zip" must still find them by
-        // name. Only files nobody searches for, or must not be indexed, stay
-        // out entirely.
+        // Documents/images are extracted/OCR'd; media, archives and fonts stay findable by name.
         let default_excluded_extensions: Vec<String> = DEFAULT_EXCLUDED_EXTENSIONS
             .iter()
             .map(|ext| ext.to_string())
@@ -495,14 +434,8 @@ impl Default for KensakuConfig {
 }
 
 impl KensakuConfig {
-    /// Resolves Kensaku's data/config directory.
-    ///
-    /// Precedence:
-    /// 1. `KENSAKU_DATA_DIR` env var (explicit override; used by tests and
-    ///    Nix/Flatpak/packagers).
-    /// 2. Portable mode: if a `portable` or `kensaku.portable` marker file
-    ///    sits next to the executable, everything lives in `<exe_dir>/data`.
-    /// 3. The platform default (`~/.config/kensaku`, `%APPDATA%\\kensaku`, …).
+    /// Data/config dir: `KENSAKU_DATA_DIR`, then portable mode (`portable` or
+    /// `kensaku.portable` marker next to the exe -> `<exe_dir>/data`), then the platform default.
     pub fn config_dir() -> PathBuf {
         let env_dir = std::env::var_os("KENSAKU_DATA_DIR");
         let exe_path = std::env::current_exe().ok();
@@ -517,18 +450,13 @@ impl KensakuConfig {
         Self::config_dir().join("index")
     }
 
-    /// Parses `content` and applies one-time migrations.
-    ///
-    /// Returns the config plus whether anything changed, so callers that loaded
-    /// from disk can persist the migrated form while [`Self::load_from_str`]
-    /// stays side-effect free.
+    /// Parses and migrates; returns whether anything changed so callers can persist.
     fn parse_and_migrate(content: &str) -> Result<(Self, bool), serde_json::Error> {
         let mut cfg: Self = serde_json::from_str(content)?;
         let mut migrated = false;
 
         if cfg.config_version < 1 {
-            // v1: document/image formats became indexable (text extraction + OCR).
-            // Strip the legacy defaults so existing installs start indexing them.
+            // v1: document/image formats became indexable.
             const LEGACY_EXCLUDED: &[&str] = &[
                 "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "png", "jpg", "jpeg", "gif",
                 "bmp", "ico", "webp", "tiff", "tif",
@@ -543,9 +471,7 @@ impl KensakuConfig {
         }
 
         if cfg.config_version < 2 {
-            // v2: early UI configs stored exclusions with a leading dot
-            // (".jpg"), so the v1 bare-name strip missed them and documents /
-            // images were never indexed. Normalize before comparing.
+            // v2: also strip legacy dot-prefixed exclusions (".jpg").
             const NOW_INDEXABLE: &[&str] = &[
                 "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "epub", "odt", "ods", "odp",
                 "rtf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif",
@@ -559,8 +485,7 @@ impl KensakuConfig {
         }
 
         if cfg.config_version < 3 {
-            // v3: first-scan completion gate. Existing installs that already
-            // completed setup are treated as having finished their first scan.
+            // v3: installs with setup complete count as having finished their first scan.
             if cfg.is_setup_complete {
                 cfg.first_scan_done = true;
             }
@@ -569,7 +494,7 @@ impl KensakuConfig {
         }
 
         if cfg.config_version < 4 {
-            // v4: default-deny common secret/credential file extensions.
+            // v4: default-deny secret/credential extensions.
             const SENSITIVE_EXTS: &[&str] = &["pem", "key", "pfx", "p12", "crt", "cer"];
             for ext in SENSITIVE_EXTS {
                 if !cfg
@@ -585,36 +510,26 @@ impl KensakuConfig {
         }
 
         if cfg.config_version < 5 {
-            // v5: the UI renamed its two themes from "paper" / "void" to
-            // "light" / "dark". Carry the user's pick over instead of
-            // silently dropping them back to the default.
+            // v5: themes renamed "paper"/"void" -> "light"/"dark".
             cfg.theme = normalize_theme(&cfg.theme);
             cfg.config_version = 5;
             migrated = true;
         }
 
         if cfg.config_version < 6 {
-            // v6: better defaults (1.0.10). Only values still on an old
-            // default move; anything the user changed is left alone.
-            //
-            // - OCR: PP-OCR now ships with every installer and is verified at
-            //   runtime, so the old default engine moves to it (Tesseract
-            //   remains the automatic fallback where PP-OCR cannot run).
+            // v6 (1.0.10): move values still on an old default; user changes are left alone.
             if cfg.ocr_engine.eq_ignore_ascii_case("tesseract") {
-                // v6 introduced PP-OCR as the default; keep that migration
-                // anchored to PP-OCR rather than following future default changes.
+                // Anchored to PP-OCR, not to future default changes.
                 cfg.ocr_engine = "accurate".to_string();
             }
-            // - Media, archives, fonts and design files become findable by
-            //   name (their contents are still never read).
+            // Media, archives, fonts and design files become findable by name.
             cfg.excluded_extensions.retain(|ext| {
                 let normalized = ext.trim_start_matches('.').to_ascii_lowercase();
                 !NAME_SEARCHABLE_SINCE_V6.contains(&normalized.as_str())
             });
-            // - `.Trash-*` never matched: exclusions are exact names.
+            // `.Trash-*` never matched: exclusions are exact names.
             cfg.excluded_dirs.retain(|dir| dir != ".Trash-*");
-            // - Content depth: raise the caps that are still at the old
-            //   defaults so books and manuals become searchable.
+            // Raise content caps still at the old defaults.
             if cfg.content_max_file_size_mb == 20 {
                 cfg.content_max_file_size_mb = default_content_max_file_size_mb();
             }
@@ -632,8 +547,7 @@ impl KensakuConfig {
         }
 
         if cfg.config_version < 7 {
-            // v7: UI language support. Normalize any persisted value; unknown
-            // codes fall back to auto-detect (None).
+            // v7: normalize language; unknown codes -> auto-detect.
             cfg.language = cfg.language.as_deref().and_then(normalize_language);
             cfg.config_version = 7;
             migrated = true;
@@ -642,8 +556,7 @@ impl KensakuConfig {
         Ok((cfg, migrated))
     }
 
-    /// Disk-free equivalent of [`Self::load`], used by tests to exercise the
-    /// migration path without touching the user's config directory.
+    /// Disk-free [`Self::load`] for tests.
     pub fn load_from_str(content: &str) -> Self {
         match Self::parse_and_migrate(content) {
             Ok((cfg, _migrated)) => cfg,
@@ -651,9 +564,7 @@ impl KensakuConfig {
         }
     }
 
-    /// Strict load for explicit reloads: a missing file is the default
-    /// config, but an unreadable or invalid file is an error instead of
-    /// silently becoming defaults (which [`Self::load`] would then persist).
+    /// Strict load: missing file -> default, invalid file -> error (not defaults).
     pub fn try_load() -> Result<Self, String> {
         let path = Self::config_path();
         if !path.exists() {
@@ -692,8 +603,7 @@ impl KensakuConfig {
                 cfg
             }
             Err(e) => {
-                // Preserve the unreadable file instead of silently discarding
-                // the user's settings: the next `save()` will overwrite it.
+                // Back up the unreadable file; the next `save()` overwrites it.
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -717,15 +627,11 @@ impl KensakuConfig {
         }
     }
 
-    /// Atomically persists the config: write a temp file, fsync it, rename it
-    /// over the real config, then (best effort on unix) fsync the directory so
-    /// the rename itself is durable.
+    /// Atomic save: temp file, fsync, rename, then best-effort directory fsync.
     pub fn save(&self) -> Result<(), String> {
         self.save_to(&Self::config_dir())
     }
 
-    /// Writes `<dir>/config.json` atomically. Extracted from [`Self::save`] so
-    /// tests can target a temporary directory instead of the real one.
     pub fn save_to(&self, dir: &Path) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let path = dir.join("config.json");
@@ -742,8 +648,7 @@ impl KensakuConfig {
 
         #[cfg(unix)]
         {
-            // `File::sync_all` on the directory flushes the rename entry. Some
-            // filesystems reject fsync on directories, hence best effort.
+            // Directory fsync makes the rename durable; some filesystems reject it.
             if let Ok(dir_file) = fs::File::open(dir) {
                 let _ = dir_file.sync_all();
             }
@@ -757,7 +662,7 @@ impl KensakuConfig {
         cfg.is_setup_complete && cfg.first_scan_done
     }
 
-    /// Alias table for the intent compiler: (term, expansions).
+    /// (term, expansions) for the intent compiler.
     pub fn alias_pairs(&self) -> Vec<(String, Vec<String>)> {
         self.aliases
             .iter()
@@ -819,10 +724,7 @@ mod tests {
 
     #[test]
     fn closing_keeps_the_app_running_by_default() {
-        // The default matters more than the setting: a corpus this large takes
-        // seconds to load, and quitting on close paid that cost on every open.
-        // An existing config file written before this field must also get the
-        // default, or the fix silently does not apply to anyone upgrading.
+        // Old config files without this field must also get the default.
         let cfg = KensakuConfig::default();
         assert!(
             cfg.close_to_background,
@@ -905,8 +807,7 @@ mod tests {
 
     #[test]
     fn portable_marker_directory_named_portable_is_not_a_marker() {
-        // `portable` must be a FILE; a directory of that name (someone's
-        // folder layout) must not silently redirect data storage.
+        // A `portable` directory (not file) must not redirect data storage.
         let exe_dir = temp_dir("marker-dir");
         std::fs::create_dir_all(exe_dir.join("portable")).unwrap();
         let resolved = resolve_config_dir(
@@ -968,7 +869,6 @@ mod tests {
         assert_eq!(cfg.content_max_semantic_units, 48);
         assert_eq!(cfg.content_depth, "balanced");
 
-        // Values the user changed stay exactly as they were.
         let customized = r#"{
             "watched_dirs": [], "excluded_dirs": [], "excluded_extensions": ["log"],
             "shortcut": "Alt+Space", "max_results": 50, "is_setup_complete": true,
@@ -991,7 +891,6 @@ mod tests {
         assert!(cfg.excluded_extensions.iter().any(|e| e == "exe"));
         assert!(!cfg.excluded_dirs.iter().any(|d| d.contains('*')));
         assert_eq!(cfg.content_max_file_size_mb, 100);
-        // A fresh config round-trips without migrating anything.
         let json = serde_json::to_string(&cfg).unwrap();
         let (_, migrated) = KensakuConfig::parse_and_migrate(&json).unwrap();
         assert!(!migrated);
@@ -1010,7 +909,6 @@ mod tests {
         assert!(!migrated);
         assert_eq!(parsed.name_only_dirs, vec![PathBuf::from("/media")]);
 
-        // A config written before the field existed still loads, unchanged.
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value.as_object_mut().unwrap().remove("name_only_dirs");
         let (legacy, _) = KensakuConfig::parse_and_migrate(&value.to_string()).unwrap();
@@ -1020,7 +918,6 @@ mod tests {
     #[test]
     fn crawl_mode_and_pause_parse_from_config() {
         let cfg = KensakuConfig::default();
-        // One default whether the config is fresh or the key is missing.
         assert_eq!(cfg.crawl_mode, CrawlMode::Balanced);
         assert_eq!(cfg.crawl_mode, CrawlMode::default());
         assert!(!cfg.pause_indexing);
@@ -1054,7 +951,6 @@ mod tests {
         let cfg = KensakuConfig::load_from_str(legacy);
 
         assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
-        // Legacy document/image extensions are stripped (case-insensitively)...
         assert!(
             !cfg.excluded_extensions
                 .iter()
@@ -1070,11 +966,8 @@ mod tests {
                 .iter()
                 .any(|e| e.eq_ignore_ascii_case("doc"))
         );
-        // ...while user-defined exclusions survive.
         assert!(cfg.excluded_extensions.iter().any(|e| e == "rs"));
-        // v6 makes archives findable by name.
         assert!(!cfg.excluded_extensions.iter().any(|e| e == "zip"));
-        // Missing defaults are filled in by serde.
         assert!(cfg.skip_hidden);
         assert!(cfg.ocr_enabled);
         assert_eq!(cfg.theme, "dark");
@@ -1240,7 +1133,6 @@ mod tests {
         assert_eq!(saved.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(saved.theme, "dark");
 
-        // A second save replaces the existing file atomically.
         let updated = KensakuConfig {
             max_results: 7,
             ..cfg

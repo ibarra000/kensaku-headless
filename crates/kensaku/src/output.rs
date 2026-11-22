@@ -9,7 +9,6 @@ pub fn json(value: &Value) {
     }
 }
 
-/// Prints strings bare and everything else as JSON.
 pub fn scalar_or_json(value: &Value) {
     match value {
         Value::String(s) => println!("{s}"),
@@ -18,7 +17,6 @@ pub fn scalar_or_json(value: &Value) {
     }
 }
 
-/// One line per array element.
 pub fn lines(value: &Value) {
     value
         .as_array()
@@ -40,7 +38,7 @@ pub fn join_paths(value: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// `path<TAB>score<TAB>snippet`, one result per line (stable for scripts).
+/// `path<TAB>score<TAB>snippet` per line (stable for scripts).
 pub fn search_results(response: &Value) {
     for result in response["results"].as_array().into_iter().flatten() {
         println!(

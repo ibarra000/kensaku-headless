@@ -34,15 +34,10 @@ zip = "9.1.0"
 ureq = { version = "2", features = ["tls", "json", "native-certs"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 paddleocr_rs_onnx = { version = "0.2.8", default-features = false, optional = true }
-# `load-dynamic`: the prebuilt static onnxruntime archive is compiled
-# against glibc 2.38+ and cannot link on older toolchains (this broke CI's
-# ubuntu-22.04 job when PP-OCRv6 joined the default builds). Dynamic loading
-# needs `libonnxruntime` at runtime; when it is absent the accurate OCR path
-# returns None and extraction falls back to Tesseract, which is always
-# available.
+# `load-dynamic`: the static onnxruntime needs glibc 2.38+; without the lib at runtime OCR falls back to Tesseract.
 ort = { version = "2.0.0-rc.15", optional = true, features = ["load-dynamic"] }
 interprocess = "2.4.7"
-# Daemon token generation (OS CSPRNG). Already in the tree via tantivy/ring.
+# Daemon token generation (OS CSPRNG).
 getrandom = "0.3"
 tree-sitter = "0.27"
 tree-sitter-rust = "0.24"
@@ -50,20 +45,17 @@ tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 parquet = { version = "60.1.0", default-features = false, features = ["snap", "flate2-rust_backend", "zstd", "lz4"] }
-# Parses .eml (RFC 822 / MIME) for email content indexing.
+# .eml (RFC 822 / MIME) parsing.
 mail-parser = "1.0.1"
-# Parses Outlook .msg (OLE/MAPI) for email content indexing.
+# Outlook .msg (OLE/MAPI) parsing.
 msg_parser = "0.3.6"
-# Undoes msg_parser's hex rendering of binary MAPI properties (the HTML body).
-# Already in the tree via msg_parser; no new download.
+# Undoes msg_parser's hex rendering of binary MAPI properties (HTML body).
 hex = "0.4"
 
 [dev-dependencies]
-# Builds Flate-compressed image streams for the scanned-PDF decoder tests.
-# Already in the tree via zip/png; no new download.
+# Flate image streams for scanned-PDF decoder tests.
 flate2 = "1"
-# Builds minimal Outlook .msg (OLE compound) files for the email extractor
-# tests. Already in the tree via infer; no new download.
+# Minimal Outlook .msg files for email extractor tests.
 cfb = "0.16"
 
 [target.'cfg(windows)'.dependencies]
@@ -75,8 +67,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-# Compile the accurate PP-OCRv6 path into normal builds. The model pack is
-# downloaded only when OCR is enabled.
+# Accurate PP-OCRv6 in normal builds; the model pack downloads only when OCR is enabled.
 default = ["accurate-ocr"]
 accurate-ocr = ["dep:paddleocr_rs_onnx", "dep:ort"]
 smart-embeddings = ["dep:ort"]

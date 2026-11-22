@@ -87,8 +87,7 @@ pub struct Query {
     pub raw: String,
     pub hints: Vec<String>,
     pub active_filters_dto: Vec<ActiveFilterDto>,
-    /// Pairs of term indices that must appear within `distance` words of each
-    /// other (the `near[x]` operator). Indices refer to `terms`.
+    /// `near[x]` pairs of indices into `terms`.
     #[serde(default)]
     pub proximity: Vec<(usize, usize, u32)>,
 }
@@ -99,7 +98,6 @@ mod tests {
 
     #[test]
     fn range_matches_covers_every_operator_boundary() {
-        // Lt / Lte at the boundary.
         assert!(RangeOp::Lt(5).matches(4));
         assert!(!RangeOp::Lt(5).matches(5));
         assert!(!RangeOp::Lt(5).matches(6));
@@ -109,13 +107,10 @@ mod tests {
         assert!(RangeOp::Gt(5).matches(6));
         assert!(RangeOp::Gte(5).matches(5));
         assert!(!RangeOp::Gte(5).matches(4));
-        // Inclusive on both ends.
         assert!(RangeOp::Between(2, 9).matches(2));
         assert!(RangeOp::Between(2, 9).matches(9));
         assert!(!RangeOp::Between(2, 9).matches(1));
         assert!(!RangeOp::Between(2, 9).matches(10));
-        // Zero and u64::MAX edges (file size 0 / enormous sizes must not
-        // wrap or overflow).
         assert!(RangeOp::Gte(0).matches(0));
         assert!(RangeOp::Lt(u64::MAX).matches(u64::MAX - 1));
         assert!(!RangeOp::Between(0, u64::MAX - 1).matches(u64::MAX));
@@ -158,8 +153,7 @@ mod tests {
 
     #[test]
     fn saved_query_without_proximity_field_still_loads() {
-        // Queries saved by 1.0.11 have no `proximity` key; the
-        // #[serde(default)] keeps those loading as empty.
+        // Pre-1.0.11 saved queries have no `proximity` key.
         let legacy = serde_json::json!({
             "terms": [],
             "filters": [],

@@ -1,14 +1,5 @@
-//! Dependency-light loader for the Potion static embedding table.
-//!
-//! The three artifacts downloaded by [`crate::models`] are:
-//!
-//! * `model.safetensors` - a single `[vocab, dim]` embedding matrix,
-//! * `tokenizer.json` - a HuggingFace BERT WordPiece tokenizer,
-//! * `config.json` - model hyper-parameters (normalization, hidden size).
-//!
-//! This module parses all three with only `serde_json` plus the standard
-//! library. Anything malformed or unsupported is rejected with `None`, which
-//! callers translate into the hashing fallback in [`crate::embed::model`].
+//! Dependency-light loader for the Potion static table (`model.safetensors`,
+//! `tokenizer.json`, `config.json`); malformed input yields `None`.
 
 use crate::embed::model::EMBEDDING_DIM;
 use serde_json::Value;
@@ -17,20 +8,18 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Hard cap on the number of WordPiece ids returned per text.
+/// Cap on WordPiece ids per text.
 pub const MAX_TOKENS: usize = 512;
 
-/// Upper bound for the safetensors JSON header. Real headers are a few KB;
-/// this only exists so a corrupt length prefix cannot allocate gigabytes.
+/// Guards against a corrupt length prefix allocating gigabytes.
 const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 
-/// An in-memory static embedding table plus the WordPiece tokenizer needed to
-/// index into it. Both are immutable after construction; hold one per process.
+/// Static embedding table plus its WordPiece tokenizer; immutable, one per process.
 #[derive(Debug)]
 pub struct StaticTable {
-    /// Row-major `[vocab, dim]` embedding matrix (f32 mode only).
+    /// Row-major `[vocab, dim]` matrix (f32 mode only).
     pub embeddings: Vec<f32>,
-    /// Quantized row-major matrix (default). One scale per row.
+    /// Quantized row-major matrix (default), one scale per row.
     pub embeddings_i8: Vec<i8>,
     pub embedding_scales: Vec<f32>,
     pub vocab: HashMap<String, u32>,
@@ -44,31 +33,17 @@ pub struct StaticTable {
 }
 
 impl StaticTable {
-    /// Loads `model.safetensors`, `tokenizer.json` and `config.json` from `dir`.
-    ///
-    /// Returns `None` when any required artifact is missing or unusable, when
-    /// the embedding matrix is not 2-D, or when its width is not
-    /// [`EMBEDDING_DIM`]. Callers should fall back to the hashing embedder.
+    /// `None` when artifacts are missing/unusable or width isn't [`EMBEDDING_DIM`].
     pub fn load(dir: &Path) -> Option<Self> {
         Self::load_with_f32(dir, false)
     }
 
-    /// Loads the table, optionally retaining the f32 matrix for one release.
-    ///
-    /// The default quantization path keeps `Vec<i8>` plus one scale per row.
-    /// Set `KENSAKU_F32_TABLE=1` as a developer escape hatch, or use
-    /// [`crate::config::KensakuConfig::semantic_f32_table`] for a persisted
-    /// switch.
+    /// Optionally keeps the f32 matrix (`KENSAKU_F32_TABLE=1` or `semantic_f32_table`).
     pub fn load_with_f32(dir: &Path, use_f32: bool) -> Option<Self> {
         Self::load_with_f32_reason(dir, use_f32).ok()
     }
 
-    /// Same load, but names the step that failed.
-    ///
-    /// The boolean form above loses the reason, and the caller reported every
-    /// failure as "model artifacts not found". That was wrong: files that are
-    /// present but unparseable, or a matrix of the wrong width, produce the
-    /// same message and send whoever is debugging to look at the wrong thing.
+    /// Like [`Self::load_with_f32`], but names the step that failed.
     pub fn load_with_f32_reason(dir: &Path, use_f32: bool) -> Result<Self, String> {
         let use_f32 = use_f32 || std::env::var_os("KENSAKU_F32_TABLE").is_some();
         let model_path = dir.join("model.safetensors");
@@ -102,8 +77,7 @@ impl StaticTable {
         let normalize = match std::fs::read(dir.join("config.json")) {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(config) => {
-                    // `hidden_size` is the transformers name; model2vec uses
-                    // `hidden_dim`. Accept either, and reject a mismatch.
+                    // transformers uses `hidden_size`, model2vec `hidden_dim`.
                     if let Some(size) = config
                         .get("hidden_size")
                         .or_else(|| config.get("hidden_dim"))
@@ -129,8 +103,7 @@ impl StaticTable {
             if use_f32 {
                 (embeddings, Vec::new(), Vec::new())
         } else {
-            // Quantize first, then drop the f32 matrix before returning so the
-            // startup peak does not retain both representations.
+            // Drop the f32 matrix before returning to cap the startup peak.
             let (quantized, scales) = quantize(&embeddings, dim);
             drop(embeddings);
             (Vec::new(), quantized, scales)
@@ -151,19 +124,17 @@ impl StaticTable {
         })
     }
 
-    /// Heap bytes held by the embedding matrix and its scales.
     pub fn table_bytes(&self) -> usize {
         self.embeddings.len() * std::mem::size_of::<f32>()
             + self.embeddings_i8.len()
             + self.embedding_scales.len() * std::mem::size_of::<f32>()
     }
 
-    /// True when the compact i8 representation is active.
     pub fn is_quantized(&self) -> bool {
         !self.embeddings_i8.is_empty()
     }
 
-    /// Encodes `text` to WordPiece ids, without any special tokens.
+    /// WordPiece ids without special tokens.
     pub fn token_ids(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
         for word in self.pre_tokenize(text) {
@@ -176,15 +147,8 @@ impl StaticTable {
         ids
     }
 
-    /// Mean characters per WordPiece piece for `text`.
-    ///
-    /// The table has single-character pieces for ASCII letters, so a word it
-    /// cannot represent degrades into a bag of single letters. That is a
-    /// spelling, not a meaning, and such vectors correlate with any
-    /// identifier- or code-heavy document (0.4-0.5 cosine for random letters
-    /// against source files). Callers use this ratio to keep the semantic tier
-    /// away from queries it can only spell out. `0.0` means nothing in the
-    /// text is representable at all.
+    /// Mean chars per piece; low values mean the text is only spelled out letter by
+    /// letter (meaningless vectors). `0.0` means nothing is representable.
     pub fn token_granularity(&self, text: &str) -> f32 {
         let chars = text.chars().filter(|c| c.is_alphanumeric()).count();
         if chars == 0 {
@@ -197,7 +161,7 @@ impl StaticTable {
         chars as f32 / pieces as f32
     }
 
-    /// Mean-pools token embedding rows, then L2-normalizes when configured.
+    /// Mean-pools token rows, then L2-normalizes when configured.
     pub fn embed(&self, text: &str) -> Vec<f32> {
         let mut out = vec![0.0f32; self.dim];
         let ids = self.token_ids(text);
@@ -242,8 +206,7 @@ impl StaticTable {
         out
     }
 
-    /// BERT-ish normalization + pre-tokenization: lowercase, drop control
-    /// characters, collapse whitespace, and isolate punctuation and CJK.
+    /// Lowercase, drop controls, collapse whitespace, isolate punctuation and CJK.
     fn pre_tokenize(&self, text: &str) -> Vec<String> {
         let mut words = Vec::new();
         let mut current = String::new();
@@ -272,23 +235,13 @@ impl StaticTable {
         words
     }
 
-    /// Greedy longest-match WordPiece with the `##` continuation prefix.
-    ///
-    /// A word with no known pieces contributes **no** ids. Mapping it to
-    /// `[UNK]` instead gives every unrepresentable word the same embedding row,
-    /// which turns the vector space into a `[UNK]` magnet: a query made of
-    /// random letters (or any script the vocabulary lacks) becomes the `[UNK]`
-    /// row itself, and every document with identifiers, hashes or non-English
-    /// words accumulates the same row. Unrelated files then score 0.3-0.6
-    /// cosine against a gibberish query. Dropping the word keeps the vector a
-    /// mean of what the model actually understands; a query nothing is known
-    /// about embeds to zero and scores nothing, which is the honest answer.
+    /// Greedy longest-match WordPiece. Unknown words contribute no ids: mapping them
+    /// to `[UNK]` makes gibberish match unrelated documents (#177).
     fn tokenize_word(&self, word: &str, ids: &mut Vec<u32>) {
         if word.is_empty() {
             return;
         }
 
-        // Fast path: the whole word is a token.
         if let Some(&id) = self.vocab.get(word) {
             ids.push(id);
             return;
@@ -322,8 +275,7 @@ impl StaticTable {
                     start = end;
                 }
                 None => {
-                    // A single unmatched character invalidates the whole word;
-                    // it contributes no embedding row (see the doc comment).
+                    // One unmatched character drops the whole word.
                     return;
                 }
             }
@@ -375,14 +327,12 @@ fn lowercase_char(ch: char, lowercase: bool) -> String {
     }
 }
 
-/// BERT's punctuation definition (ASCII ranges), which is what
-/// `BertPreTokenizer` splits on.
+/// BERT's ASCII punctuation ranges (`BertPreTokenizer`).
 fn is_punctuation(ch: char) -> bool {
     ch.is_ascii_punctuation()
 }
 
-/// `BertNormalizer` surrounds CJK ideographs/kana/hangul with spaces so each
-/// becomes its own pre-token. Roughly mirrors `handle_chinese_chars`.
+/// CJK chars become their own pre-token (`handle_chinese_chars`).
 fn is_cjk(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -394,10 +344,7 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
-/// Quantizes a row-major f32 matrix to i8 with one symmetric scale per row.
-///
-/// Returns `(values, scales)` where each row's dequantized value is
-/// `value as f32 * scales[row]`.
+/// Symmetric per-row i8 quantization; dequantized = `value as f32 * scales[row]`.
 fn quantize(embeddings: &[f32], dim: usize) -> (Vec<i8>, Vec<f32>) {
     let rows = embeddings.len() / dim;
     let mut out = Vec::with_capacity(embeddings.len());
@@ -490,7 +437,7 @@ fn parse_tokenizer(value: &Value, vocab_size: usize) -> Option<TokenizerParts> {
     })
 }
 
-/// Parses one safetensors file and returns `(embeddings, vocab_size, dim)`.
+/// Returns `(embeddings, vocab_size, dim)`.
 fn parse_safetensors<R: Read + Seek>(reader: &mut R) -> Option<(Vec<f32>, usize, usize)> {
     let mut length_bytes = [0u8; 8];
     reader.read_exact(&mut length_bytes).ok()?;
@@ -532,10 +479,7 @@ fn parse_safetensors<R: Read + Seek>(reader: &mut R) -> Option<(Vec<f32>, usize,
     }
     let vocab_size = shape[0];
     let dim = shape[1];
-    // Keep a wrong width in the result so the loader can say which width it
-    // found and which one this build expects. Returning `None` here collapsed
-    // that into "not a readable safetensors matrix" and sent whoever debugged
-    // it looking at the wrong problem.
+    // Keep a wrong width so the loader can report found vs. expected.
     let item_size: u64 = match dtype.as_str() {
         "F32" => 4,
         "F16" => 2,
@@ -591,21 +535,19 @@ fn tensor_info(value: &Value) -> Option<(String, Vec<usize>, u64, u64)> {
     Some((dtype, shape, offsets[0].as_u64()?, offsets[1].as_u64()?))
 }
 
-/// IEEE 754 half-precision to single-precision conversion (no dependency).
+/// IEEE 754 half to single precision.
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) & 1;
     let exponent = (bits >> 10) & 0x1f;
     let fraction = bits & 0x03ff;
 
     let magnitude = if exponent == 0 {
-        // Subnormal (or zero).
         if fraction == 0 {
             0.0
         } else {
             (fraction as f32) * (2.0f32).powi(-24)
         }
     } else if exponent == 0x1f {
-        // Infinity / NaN.
         if fraction == 0 {
             f32::INFINITY
         } else {
@@ -655,10 +597,7 @@ mod tests {
 
     #[test]
     fn load_reason_names_the_missing_file_instead_of_saying_not_found() {
-        // The old path reported every failure as "model artifacts not found",
-        // including the case where the file is there and unreadable. Health
-        // then said the models were fine while the loader refused them, and
-        // whoever read it looked in the wrong place.
+        // Every failure must name its cause, not "not found".
         let dir = temp_dir("reason-missing");
         std::fs::create_dir_all(&dir).unwrap();
         let reason = StaticTable::load_with_f32_reason(&dir, false).unwrap_err();
@@ -667,7 +606,6 @@ mod tests {
             "reason must name the file it could not open, got: {reason}"
         );
 
-        // Present, but not a safetensors file.
         std::fs::write(dir.join("model.safetensors"), b"not a matrix").unwrap();
         let reason = StaticTable::load_with_f32_reason(&dir, false).unwrap_err();
         assert!(
@@ -681,7 +619,6 @@ mod tests {
     fn load_reason_reports_a_width_mismatch_rather_than_not_found() {
         let dir = temp_dir("reason-width");
         std::fs::create_dir_all(&dir).unwrap();
-        // A valid matrix of the wrong width: 4 floats per row.
         let rows = 8usize;
         let data = vec![0u8; rows * 4 * 4];
         std::fs::write(
@@ -715,7 +652,7 @@ mod tests {
 
     #[test]
     fn parses_f16_safetensors_header() {
-        // 1.0, -2.0, 0.5, 0.0 in IEEE 754 half precision.
+        // 1.0, -2.0, 0.5, 0.0 in half precision.
         let values: [u16; 4] = [0x3c00, 0xc000, 0x3800, 0x0000];
         let mut data = Vec::new();
         for value in values {
@@ -751,7 +688,6 @@ mod tests {
 
     #[test]
     fn wordpiece_tokenization() {
-        // 128 rows is more than enough for this tiny vocab.
         let table = StaticTable::test_table(
             vec![0.0; 8 * EMBEDDING_DIM],
             &[
@@ -769,23 +705,18 @@ mod tests {
         assert_eq!(table.token_ids("hello world"), vec![2, 3]);
         assert_eq!(table.token_ids("playing"), vec![5, 4]);
         assert_eq!(table.token_ids("played"), vec![5, 6]);
-        // Unrepresentable words contribute nothing: mapping them to `[UNK]`
-        // made every garbage query and every identifier-heavy document share
-        // one embedding row, so gibberish scored 0.3-0.6 against unrelated
-        // files (#177).
+        // Unrepresentable words contribute nothing (#177).
         assert!(table.token_ids("zzz").is_empty());
         assert!(table.token_ids("kjhdfkhoqiuw").is_empty());
         assert_eq!(table.token_ids("hello zzz world"), vec![2, 3]);
-        // Lowercased before lookup; unknown punctuation is dropped with the
-        // word it is attached to, and whitespace is collapsed.
+        // Lowercased; unknown punctuation drops its word; whitespace collapsed.
         assert_eq!(table.token_ids("  Hello,\tWORLD!  "), vec![2, 3]);
     }
 
     #[test]
     fn unrepresentable_text_embeds_to_zero_instead_of_the_unknown_row() {
         let mut embeddings = vec![0.0f32; 8 * EMBEDDING_DIM];
-        // Both the `[UNK]` row and the `hello` row are non-zero, so the test can
-        // tell "produced the [UNK] row" apart from "produced nothing".
+        // Non-zero rows distinguish "[UNK] row" from "nothing".
         for row in [1usize, 2] {
             for v in &mut embeddings[row * EMBEDDING_DIM..(row + 1) * EMBEDDING_DIM] {
                 *v = 0.5;
@@ -802,8 +733,7 @@ mod tests {
             garbage.iter().all(|v| *v == 0.0),
             "a query the vocabulary cannot represent must not become the [UNK] row"
         );
-        // The [UNK] row is still part of the matrix; it is just never produced
-        // by an unmatched word, so nothing can cluster on it.
+        // [UNK] stays in the matrix but is never produced by an unmatched word.
         assert_eq!(table.unknown_id, 1);
         assert!(table.embed("hello").iter().any(|v| *v != 0.0));
     }
@@ -811,7 +741,6 @@ mod tests {
     #[test]
     fn static_embedding_is_mean_pooled_and_normalized() {
         let mut embeddings = vec![0.0f32; 8 * EMBEDDING_DIM];
-        // Row 2 = all ones, row 3 = all twos.
         for v in &mut embeddings[2 * EMBEDDING_DIM..3 * EMBEDDING_DIM] {
             *v = 1.0;
         }
@@ -826,7 +755,7 @@ mod tests {
 
         let vector = table.embed("hello world");
         assert_eq!(vector.len(), EMBEDDING_DIM);
-        // Mean of 1s and 2s is 1.5 in every dimension; normalized => 1/sqrt(256).
+        // Mean of 1s and 2s, normalized => 1/sqrt(256).
         let expected = 1.0 / (EMBEDDING_DIM as f32).sqrt();
         for value in &vector {
             assert!((value - expected).abs() < 1e-6, "unexpected value {value}");
@@ -865,9 +794,7 @@ mod tests {
 
     #[test]
     fn quantized_table_reports_budget_and_keeps_recall() {
-        // Quality gate on a synthetic golden set: the real model artifacts are
-        // not part of the repository, so ranking is compared row-for-row with
-        // the f32 matrix. This catches quantization-induced rank inversions.
+        // Catches quantization-induced rank inversions against the f32 matrix.
         let rows = 96;
         let dim = 64;
         let embeddings = synthetic_embeddings(rows, dim);
@@ -1049,7 +976,7 @@ mod real_model_validation {
         let f32_table = StaticTable::load_with_f32(path, true).expect("f32 table");
         let i8_table = StaticTable::load_with_f32(path, false).expect("i8 table");
 
-        // A small labelled set: the relevant document is always index 0.
+        // The relevant document is always index 0.
         let queries: &[(&str, &[&str])] = &[
             (
                 "invoice payment",

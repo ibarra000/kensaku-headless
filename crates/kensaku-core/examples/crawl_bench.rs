@@ -1,12 +1,5 @@
-//! End-to-end crawl benchmark.
-//!
-//! Builds a throwaway index in an isolated config directory, runs a fresh crawl
-//! and an incremental crawl over the given fixture, and reports wall time,
-//! counts, and peak RSS. Linux only (uses `/proc/self/status` for RSS).
-//!
-//! ```bash
-//! cargo run --example crawl_bench --release -- ~/Pictures
-//! ```
+//! Fresh + incremental crawl benchmark in an isolated config dir; reports time, counts, peak RSS (Linux only).
+//! `cargo run --example crawl_bench --release -- ~/Pictures`
 
 use kensaku_core::config::KensakuConfig;
 use kensaku_core::indexer::IndexerManager;
@@ -28,7 +21,6 @@ fn peak_rss_mb() -> Option<u64> {
 fn crawl(manager: &IndexerManager) -> (Duration, kensaku_core::indexer::IndexingStatus) {
     let t = Instant::now();
     manager.start_indexing();
-    // Let the crawl thread publish its first status.
     std::thread::sleep(Duration::from_millis(200));
     while manager.get_status().is_indexing {
         std::thread::sleep(Duration::from_millis(100));

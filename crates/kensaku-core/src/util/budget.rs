@@ -1,28 +1,9 @@
-//! A byte budget for decoded image buffers that are alive at the same time.
-//!
-//! Image recognition holds a full decoded page in memory while it runs. The
-//! cost is `width * height * 4` bytes, which is roughly 400 MB for a 100 MP
-//! scan. Worker threads used to decode whenever they reached an image, so the
-//! peak was "how many images are in flight times how big they are", and the
-//! number of workers came from the CPU count, not from memory.
-//!
-//! The budget makes the peak explicit. A caller reserves the decoded size before
-//! it decodes, and waits while the reservation would exceed the budget. The
-//! reservation is returned when the [`Permit`] is dropped.
-//!
-//! Requests larger than the whole budget are clamped to the budget. Such a
-//! request waits until nothing else is reserved and then runs alone. That keeps
-//! an oversized image from deadlocking the queue while still making it the only
-//! thing in memory.
+//! Byte budget bounding decoded image buffers in flight; oversized requests
+//! are clamped to the whole budget and run alone instead of deadlocking.
 
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
-/// Default budget for decoded images in flight: 768 MiB.
-///
-/// Large enough for several typical photos or screenshots at once, small enough
-/// that a 16 GB machine keeps most of its memory for everything else. Override
-/// with `KENSAKU_DECODE_BUDGET_MB` (for example on a workstation that wants more
-/// parallelism, or on a small machine that wants less).
+/// Default decode budget (768 MiB); override with `KENSAKU_DECODE_BUDGET_MB`.
 pub const DEFAULT_DECODE_BUDGET_BYTES: u64 = 768 * 1024 * 1024;
 
 /// Counting semaphore measured in bytes.
@@ -32,7 +13,6 @@ pub struct DecodeBudget {
     released: Condvar,
 }
 
-/// A reservation. Dropping it returns the bytes to the budget.
 #[must_use = "dropping the permit immediately releases the reservation"]
 pub struct Permit {
     budget: &'static DecodeBudget,
@@ -40,8 +20,7 @@ pub struct Permit {
 }
 
 impl DecodeBudget {
-    /// A budget of `total` bytes. Zero is treated as one byte, so every request
-    /// is still serialized rather than refused.
+    /// Zero is treated as one byte, so requests serialize rather than fail.
     pub fn new(total: u64) -> Self {
         Self {
             total: total.max(1),
@@ -50,20 +29,15 @@ impl DecodeBudget {
         }
     }
 
-    /// Total capacity in bytes.
     pub fn total(&self) -> u64 {
         self.total
     }
 
-    /// Bytes currently reserved by live permits.
     pub fn in_use(&self) -> u64 {
         *self.lock()
     }
 
-    /// Waits until `bytes` can be reserved, then returns the reservation.
-    ///
-    /// `bytes` is clamped to the budget, so this always returns. A zero request
-    /// reserves one byte, which keeps accounting honest for empty inputs.
+    /// Blocks until `bytes` (clamped to the budget, min 1) can be reserved.
     pub fn acquire(&'static self, bytes: u64) -> Permit {
         let wanted = bytes.clamp(1, self.total);
         let mut in_use = self.lock();
@@ -81,8 +55,7 @@ impl DecodeBudget {
     }
 
     fn lock(&self) -> MutexGuard<'_, u64> {
-        // A panic while holding the lock leaves the counter as it was; there is
-        // nothing to repair, so keep serving rather than cascading the panic.
+        // Poison is harmless: the counter needs no repair.
         self.in_use.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -95,7 +68,6 @@ impl DecodeBudget {
 }
 
 impl Permit {
-    /// Bytes this permit reserved (after clamping).
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -107,7 +79,6 @@ impl Drop for Permit {
     }
 }
 
-/// The process-wide budget for decoded images.
 pub fn decode_budget() -> &'static DecodeBudget {
     static BUDGET: OnceLock<DecodeBudget> = OnceLock::new();
     BUDGET.get_or_init(|| {
@@ -121,7 +92,6 @@ pub fn decode_budget() -> &'static DecodeBudget {
     })
 }
 
-/// Bytes an RGBA8 decode of `width` x `height` will occupy.
 pub fn rgba_bytes(width: u32, height: u32) -> u64 {
     u64::from(width) * u64::from(height) * 4
 }
@@ -134,8 +104,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    /// Leaks a budget so the `'static` lifetime the permit needs is satisfied in
-    /// tests. Test processes are short-lived, so the leak is harmless.
     fn leak(total: u64) -> &'static DecodeBudget {
         Box::leak(Box::new(DecodeBudget::new(total)))
     }
@@ -173,8 +141,7 @@ mod tests {
 
     #[test]
     fn concurrent_holders_never_exceed_the_budget() {
-        // Each thread reserves 30 of a 100-byte budget. At most three can hold
-        // a permit at once, so the observed peak must never pass 100.
+        // At most three 30-byte permits fit in 100, so the peak stays <= 100.
         let budget = leak(100);
         let live = Arc::new(AtomicU64::new(0));
         let peak = Arc::new(AtomicU64::new(0));

@@ -37,10 +37,10 @@ pub struct SearchResult {
     pub is_dir: bool,
     pub match_type: MatchType,
     pub best_range: Option<(usize, usize)>,
-    /// Number of files collapsed into this row by version grouping.
+    /// Files collapsed into this row by version grouping.
     #[serde(default = "one")]
     pub group_count: usize,
-    /// Other paths in this version group (empty when not grouped).
+    /// Other paths in this version group.
     #[serde(default)]
     pub group_paths: Vec<String>,
 }
@@ -62,7 +62,7 @@ pub struct Facets {
     pub time: HashMap<String, usize>,
     /// tiny (<1 MB) / small (<10 MB) / medium (<100 MB) / large (>=100 MB).
     pub size: HashMap<String, usize>,
-    /// Anything modified in the last 7 days.
+    /// Modified in the last 7 days.
     pub recent: usize,
 }
 
@@ -87,10 +87,7 @@ const LANGUAGE_BUCKETS: [&str; 15] = [
 const TIME_BUCKETS: [&str; 5] = ["today", "week", "month", "year", "older"];
 const SIZE_BUCKETS: [&str; 4] = ["tiny", "small", "medium", "large"];
 
-/// Category and language index for one extension. Categories index
-/// [`TYPE_BUCKETS`] (folders are 0 and handled by the caller); languages index
-/// [`LANGUAGE_BUCKETS`]. Combining both lookups avoids a second string match on
-/// the large-result-set facet path.
+/// (index into [`TYPE_BUCKETS`], index into [`LANGUAGE_BUCKETS`]); folders are handled by the caller.
 fn classify_extension(ext: &str) -> (usize, Option<usize>) {
     match ext {
         "rs" => (3, Some(0)),
@@ -121,8 +118,7 @@ fn classify_extension(ext: &str) -> (usize, Option<usize>) {
     }
 }
 
-/// FNV-1a, used only for the short-lived parent-name map. Place keys are
-/// borrowed from the result set, so the map never allocates just to count.
+/// FNV-1a for the short-lived parent-name map.
 #[derive(Default)]
 struct FnvHasher(u64);
 
@@ -145,8 +141,7 @@ impl std::hash::Hasher for FnvHasher {
     }
 }
 
-/// Accumulator for facet counts. The parent-name keys borrow from the result
-/// set, so counting never allocates per row.
+/// Facet accumulator; parent-name keys borrow from the results (no per-row allocation).
 #[derive(Default)]
 struct FacetAcc<'a> {
     types: [usize; TYPE_BUCKETS.len()],
@@ -177,8 +172,7 @@ impl<'a> FacetAcc<'a> {
         if let Some(language) = language {
             self.languages[language] += 1;
         }
-        // Two splits are much cheaper than Path::parent/file_name for the
-        // millions of rows a broad query can return.
+        // Cheaper than Path::parent/file_name over millions of rows.
         let mut components = result.path.rsplit(['/', '\\']);
         let _file = components.next();
         if let Some(parent_name) = components.next()
@@ -271,12 +265,7 @@ impl<'a> FacetAcc<'a> {
     }
 }
 
-/// Computes facet counts over the full matched set.
-///
-/// Public so the performance harness can measure it directly; the UI receives
-/// it through [`SearchResponse::facets`]. Large matched sets are folded across
-/// the existing rayon pool; small ones stay sequential to avoid scheduling
-/// overhead on the keystroke path.
+/// Facet counts over the full matched set; large sets fold across rayon.
 pub fn compute_facets(results: &[SearchResult], now_sec: u64) -> Facets {
     const PARALLEL_THRESHOLD: usize = 20_000;
 
@@ -299,9 +288,8 @@ pub fn compute_facets(results: &[SearchResult], now_sec: u64) -> Facets {
     accumulator.into_facets(results.len())
 }
 
-/// Version grouping: collapse `resume`, `resume_v2`, `resume_final` into one
-/// row when they share a parent directory, stem and extension. Conservative:
-/// at least one member must carry a version marker.
+/// Collapses `resume`, `resume_v2`, `resume_final` sharing parent, stem and
+/// extension; at least one member must carry a version marker.
 fn group_versions(results: &mut Vec<SearchResult>) {
     use std::sync::OnceLock;
     static MARKERS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
@@ -377,11 +365,7 @@ fn group_versions(results: &mut Vec<SearchResult>) {
     });
 }
 
-/// Collapses image results that belong to the same screenshot burst.
-///
-/// The first result in rank order is kept and carries the other paths; this is
-/// a pure O(results) pass over an in-memory map, so it adds no database query
-/// to the search path. Non-image rows never participate.
+/// Collapses image results from the same screenshot burst into the top-ranked one.
 fn group_bursts<F>(results: &mut Vec<SearchResult>, burst_for: F)
 where
     F: Fn(&SearchResult) -> Option<u64>,
@@ -483,8 +467,7 @@ fn apply_sort(results: &mut [SearchResult], sort: SortOrder) {
                 })
                 .then_with(|| a.path.cmp(&b.path))
         }),
-        // Cached key: a comparator allocating two Strings per comparison was
-        // allocating O(n log n) times to order the page.
+        // Cached key avoids O(n log n) String allocations.
         SortOrder::Name => results.sort_by_cached_key(|result| {
             (result.filename.to_lowercase(), result.path.clone())
         }),
@@ -498,15 +481,14 @@ pub struct SearchResponse {
     pub active_filters: Vec<ActiveFilterDto>,
     pub hints: Vec<String>,
     pub search_time_ms: u64,
-    /// Count of matches before the display limit (collected count for
-    /// `mode:exhaustive`).
+    /// Matches before the display limit (collected count for `mode:exhaustive`).
     pub total: usize,
     /// `"ranked"` or `"exhaustive"`.
     pub mode: String,
-    /// Natural-language interpretations applied to this query.
+    /// Natural-language interpretations applied.
     #[serde(default)]
     pub interpretation: Vec<crate::query::intent::InterpretationChip>,
-    /// Server-side counts over the full matched set (before the display limit).
+    /// Counts over the full matched set.
     #[serde(default)]
     pub facets: Facets,
 }
@@ -534,10 +516,7 @@ impl SearchDispatcher {
         resp.results
     }
 
-    /// Runs a query and attaches snippets for the top results.
-    ///
-    /// Snippets come from the extraction-free fast path, so this stays cheap
-    /// even for PDFs and images.
+    /// Runs a query with snippets for top results (extraction-free fast path).
     pub fn search_response(
         raw_query: &str,
         metadata: &MetadataStore,
@@ -564,7 +543,6 @@ impl SearchDispatcher {
         )
     }
 
-    /// Runs a query with visual vector search enabled.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_with_visual(
         raw_query: &str,
@@ -593,7 +571,6 @@ impl SearchDispatcher {
         )
     }
 
-    /// Runs a query with personal-vocabulary aliases applied.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_with_aliases(
         raw_query: &str,
@@ -622,10 +599,7 @@ impl SearchDispatcher {
         )
     }
 
-    /// Runs a query without touching file contents at all.
-    ///
-    /// Used by fast-paint clients: results render immediately
-    /// and requests snippets separately through `get_snippets`.
+    /// Runs a query without touching file contents; snippets come via `get_snippets`.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_fast(
         raw_query: &str,
@@ -653,7 +627,7 @@ impl SearchDispatcher {
         )
     }
 
-    /// Sorted variant used by the desktop UI.
+    /// Sorted variant.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_fast_sorted(
         raw_query: &str,
@@ -682,8 +656,7 @@ impl SearchDispatcher {
         )
     }
 
-    /// Sorted variant with an explicit snippet switch. The daemon uses this so
-    /// CLI callers keep snippets while MCP can batch its own extraction.
+    /// Sorted variant with an explicit snippet switch.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_fast_sorted_with_snippets(
         raw_query: &str,
@@ -715,12 +688,8 @@ impl SearchDispatcher {
         )
     }
 
-    /// Exhaustive keyset pagination: like
-    /// [`Self::search_response_fast_sorted_with_snippets`] but only returning
-    /// matches strictly after `start_after` (a path keyset cursor). Used by
-    /// the agent surfaces to page past the 10k exhaustive cap without
-    /// materialising more than one window at a time. Sort is forced to path
-    /// order: keyset pagination is only meaningful over a stable order.
+    /// Keyset pagination past the exhaustive cap: matches strictly after
+    /// `start_after`, always in path order.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_exhaustive_after(
         raw_query: &str,
@@ -751,7 +720,6 @@ impl SearchDispatcher {
         )
     }
 
-    /// Sorted variant with snippets and visual store support.
     #[allow(clippy::too_many_arguments)]
     pub fn search_response_fast_sorted_with_snippets_and_visual(
         raw_query: &str,
@@ -816,7 +784,6 @@ impl SearchDispatcher {
             };
         }
 
-        // Deterministic natural-language pass. Explicit grammar is left alone.
         let intent = crate::query::intent::compile_with_aliases(raw_query, aliases);
         let effective_query = intent.query.as_str();
         let sort = if sort == SortOrder::Best {
@@ -835,13 +802,7 @@ impl SearchDispatcher {
             .unwrap_or(0);
 
         let trie = metadata.get_directory_trie();
-        // Materializing a FileEntry reconstructs the path from the node arena,
-        // joins a PathBuf and copies the name: several allocations per file,
-        // for every query. On a 25k-file corpus that is ~100k allocations per
-        // keystroke, which is the arena's whole purpose undone by the query
-        // path. The store bumps `generation` on every mutation that can change
-        // this list, so caching against it is a single comparison.
-        // Cached inside the store, per generation: see `entries_snapshot`.
+        // Materializing entries is several allocations per file; cache per store generation.
         let generation = metadata.generation();
         let entries = metadata.entries_snapshot();
         let needs_trie = query_needs_trie(effective_query);
@@ -854,10 +815,7 @@ impl SearchDispatcher {
         } else {
             HashMap::new()
         };
-        // Prefer the store's path index. Some synthetic/partial stores (for
-        // example a fixture that inserts files without their parent
-        // directories) cannot resolve every path, so build a fallback map from
-        // the materialized entries on first miss.
+        // Fallback path map for partial stores that cannot resolve every path.
         let fallback_path_index: std::cell::RefCell<Option<HashMap<PathBuf, usize>>> =
             std::cell::RefCell::new(None);
         let resolve_index = |path: &Path| -> Option<usize> {
@@ -880,7 +838,6 @@ impl SearchDispatcher {
             fallback.as_ref().and_then(|index| index.get(path).copied())
         };
 
-        // 1. Parse AST from query
         let mut parsed = parse_query(
             effective_query,
             &entries,
@@ -890,14 +847,11 @@ impl SearchDispatcher {
         );
         let route = crate::query::router::route_query(&parsed);
 
-        // Pre-compile filters once per query (lowercase strings, intern extensions)
         let compiled_filters: Vec<CompiledFilter> =
             parsed.filters.iter().map(CompiledFilter::from).collect();
-        // Positive ext/size clauses can safely narrow the Tantivy query; the
-        // normal metadata filter still runs afterwards.
+        // Positive ext/size clauses narrow the Tantivy query; metadata filters still run.
         let pushdown_filters = content_pushdown(&parsed.filters);
 
-        // 2. Resolve scopes and filter candidates
         let candidate_indices: Vec<usize> = if !parsed.scopes.is_empty() {
             let mut included = HashSet::new();
             let mut has_include_scope = false;
@@ -919,7 +873,6 @@ impl SearchDispatcher {
                 (0..entries.len()).collect()
             };
 
-            // Remove any excluded scopes
             let mut excluded = HashSet::new();
             for scope in &parsed.scopes {
                 if !scope.include {
@@ -950,9 +903,7 @@ impl SearchDispatcher {
             (0..entries.len()).collect()
         };
 
-        // Extract positive terms text, split by field scoping (name:/content:/path:)
-        // so that field-scoped terms only search their target field. Regex terms
-        // (`re:`) never enter the fuzzy/BM25 text tiers.
+        // Field-scoped terms search only their field; `re:` terms skip fuzzy/BM25.
         let mut fuzzy_terms: Vec<&str> = Vec::new(); // Any, Name, Path → fuzzy (filename + path)
         let mut bm25_groups: Vec<(FieldKind, &str)> = Vec::new();
         let mut regex_patterns: Vec<&str> = Vec::new();
@@ -973,9 +924,7 @@ impl SearchDispatcher {
                 involved.insert(*j);
             }
             for (i, j, distance) in &parsed.proximity {
-                // Pass the canonical `near[x]` form through to the content
-                // index, which knows how to rewrite it into a phrase query.
-                // Terms are sanitized by that rewrite.
+                // The content index rewrites (and sanitizes) the canonical `near[x]` form.
                 let expr = format!(
                     "{} near[{}] {}",
                     parsed.terms[*i].text, distance, parsed.terms[*j].text
@@ -1038,19 +987,14 @@ impl SearchDispatcher {
         };
         let search_text_lower = search_text.to_lowercase();
 
-        // Membership checks are free when the candidate list is the whole
-        // corpus (the common unfiltered query).
         let candidate_set = CandidateSet::new(&candidate_indices, entries.len());
 
-        // The node-id map only serves the semantic/visual tiers. Building a
-        // million-entry map for a plain filename query is pure overhead.
+        // The node-id map only serves semantic/visual tiers; skip it otherwise.
         let wants_semantic = semantic_enabled
             && unit_store.is_some()
             && !search_text.is_empty()
             && !has_near
             && ModelRegistry::global().is_enabled();
-        // No encoder means the visual tier never runs; building the id map for it
-        // would cost O(corpus) on every text query for nothing.
         let wants_visual = crate::embed::visual::visual_available()
             && visual_store.is_some()
             && !search_text.is_empty()
@@ -1065,7 +1009,6 @@ impl SearchDispatcher {
                         map.insert(entry.id, idx);
                     }
                 }
-                // An unfiltered query allows every node, so the set filters nothing.
                 let allowed = if map.is_empty() || candidate_set.all {
                     None
                 } else {
@@ -1076,7 +1019,7 @@ impl SearchDispatcher {
                 (HashMap::new(), None)
             };
 
-        // 2b. Exhaustive mode: no fuzzy/semantic tiers, enumerate by path.
+        // Exhaustive mode: no fuzzy/semantic tiers, enumerate by path.
         if parsed.mode == Mode::Exhaustive {
             let mut hints = parsed.hints;
             let mut results = exhaustive_results(
@@ -1092,8 +1035,7 @@ impl SearchDispatcher {
                 &mut hints,
                 start_after,
             );
-            // Keyset pages must stay path-ordered for the cursor to work;
-            // user sorts only apply to offset-based pages.
+            // Keyset pages must stay path-ordered; user sorts apply only to offset pages.
             if start_after.is_none() {
                 apply_sort(&mut results, sort);
             }
@@ -1122,11 +1064,10 @@ impl SearchDispatcher {
             };
         }
 
-        // 3. Tier 1: Fuzzy filename search (< 5ms)
+        // Tier 1: fuzzy filename.
         let mut fuzzy_ranks: HashMap<usize, usize> = HashMap::new();
         if !fuzzy_text.is_empty() {
             let mut fuzzy_searcher = FuzzySearcher::new();
-            // Search across candidate entries by index (no clone needed)
             let fuzzy_matches =
                 fuzzy_searcher.search(&fuzzy_text, &entries, &candidate_indices, limit * 3);
             for (rank, (orig_idx, _score)) in fuzzy_matches.into_iter().enumerate() {
@@ -1134,9 +1075,7 @@ impl SearchDispatcher {
             }
         }
 
-        // 4. Tier 2: Tantivy BM25 content search (< 50ms)
-        // A single include scope is pushed into the Tantivy query as a path
-        // prefix, so BM25 never scores documents outside the scope.
+        // Tier 2: BM25; a single include scope is pushed down as a path prefix.
         let scope_prefix: Option<String> = {
             let mut includes = parsed.scopes.iter().filter(|s| s.include);
             match (includes.next(), includes.next()) {
@@ -1161,20 +1100,8 @@ impl SearchDispatcher {
             }
         }
 
-        // 5. Tier 3: Static semantic vector scan (< 5ms)
-        // Weak vectors are kept in the map (with their raw cosine) so hits that
-        // also match fuzzy/BM25 still contribute; the floor below is applied
-        // only when creating a semantic-only candidate.
-        //
-        // Measured on a 461-chunk corpus (#177): random letters scored up to
-        // 0.56 against unrelated source files and 25-50% of chunks cleared the
-        // old 0.28 floor, while a word the corpus does not contain
-        // ("kubernetes") produced 0.31-0.33 junk with no true hit. Two things
-        // caused it: an absolute floor cannot separate a compressed similarity
-        // band at corpus scale, and the table can only spell some queries out
-        // one letter at a time. So the query's tokenization decides whether the
-        // tier runs, the floor sits in the measured gap, and only a handful of
-        // semantic-only results are admitted.
+        // Tier 3: semantic. Weak vectors still boost lexical hits; semantic-only hits
+        // need the floor, a usable tokenization and a bounded count (#177).
         let model = ModelRegistry::global();
         let semantic_query_usable = semantic_query_is_usable(&model, search_text);
         let semantic_floor = semantic_only_floor(&model);
@@ -1221,7 +1148,7 @@ impl SearchDispatcher {
             }
         }
 
-        // 5b. Tier 4: Visual vector scan over image nodes (< 5ms)
+        // Tier 4: visual.
         let visual_floor = 0.20f32;
         let mut visual_ranks: HashMap<PathBuf, (usize, f32)> = HashMap::new();
         if !search_text.is_empty()
@@ -1262,14 +1189,8 @@ impl SearchDispatcher {
             }
         }
 
-        // 6. 4-tier RRF Fusion (k = 60.0) with dynamic route weights
-        //
-        // Semantic-only candidates are the strongest few that clear the model's
-        // floor. Choosing them here, rather than inside the merge loop, makes
-        // the subset deterministic (ties break on path) and bounded: on a large
-        // index a few hundred units can clear any absolute floor, and a long
-        // "vaguely related" tail is what buried the real hits in #177. Files
-        // already found by a lexical tier are merged regardless.
+        // RRF fusion (k = 60) with route weights. Semantic-only candidates are
+        // pre-selected (deterministic, bounded); lexical hits merge regardless.
         let semantic_only_allowed: HashSet<PathBuf> = {
             let mut admitted: Vec<(&PathBuf, f32)> = semantic_ranks
                 .iter()
@@ -1298,7 +1219,7 @@ impl SearchDispatcher {
         let mut candidates: HashMap<PathBuf, MatchCandidate> = HashMap::new();
 
         if fuzzy_text.is_empty() && bm25_groups.is_empty() && regex_patterns.is_empty() {
-            // Filter-only / folder navigation browsing mode
+            // Filter-only / folder browsing.
             for &idx in &candidate_indices {
                 if let Some(entry) = entries.get(idx) {
                     candidates.insert(
@@ -1325,7 +1246,6 @@ impl SearchDispatcher {
                 _ => (1.0, 1.0, 1.0, 0.8),
             };
 
-            // Merge fuzzy matches
             for (&idx, &rank) in &fuzzy_ranks {
                 if let Some(entry) = entries.get(idx) {
                     let rrf = w_fuzzy * (1.0 / (60.0 + (rank as f64)));
@@ -1345,7 +1265,6 @@ impl SearchDispatcher {
                 }
             }
 
-            // Merge BM25 matches
             for (path, &rank) in &bm25_ranks {
                 if let Some(orig_idx) = resolve_index(path) {
                     if !candidate_set.contains(orig_idx) {
@@ -1373,7 +1292,6 @@ impl SearchDispatcher {
                 }
             }
 
-            // Merge Semantic matches
             for (path, &(rank, _cosine, range)) in &semantic_ranks {
                 let Some(orig_idx) = resolve_index(path) else {
                     continue;
@@ -1387,9 +1305,6 @@ impl SearchDispatcher {
                     cand.rrf_score += rrf;
                     cand.best_range = Some(range);
                 } else {
-                    // Semantic-only candidates come from the pre-selected,
-                    // bounded set; anything else is a weak hit that has no
-                    // lexical support, which is exactly what the floor is for.
                     if !semantic_only_allowed.contains(path) {
                         continue;
                     }
@@ -1409,7 +1324,6 @@ impl SearchDispatcher {
                 }
             }
 
-            // Merge Visual matches
             for (path, &(rank, cosine)) in &visual_ranks {
                 let Some(orig_idx) = resolve_index(path) else {
                     continue;
@@ -1441,10 +1355,7 @@ impl SearchDispatcher {
                 }
             }
 
-            // Tier 4: folded trigrams, only when the exact/fuzzy/semantic
-            // tiers left a shortfall. The lower weight keeps these after
-            // exact hits, and raw-text verification has already rejected
-            // broad n-gram noise.
+            // Folded trigrams only to fill a shortfall, weighted below exact hits.
             if candidates.len() < limit
                 && !search_text.is_empty()
                 && !has_near
@@ -1490,9 +1401,7 @@ impl SearchDispatcher {
             }
         }
 
-        // 7. Apply ranking bonuses & build SearchResults
-        // Normalize RRF before bonuses so an absolute depth term cannot
-        // dominate the fused relevance signal.
+        // Normalize RRF before bonuses so the depth term can't dominate.
         let max_rrf = candidates
             .values()
             .map(|candidate| candidate.rrf_score)
@@ -1503,8 +1412,6 @@ impl SearchDispatcher {
             .filter_map(|(path, cand)| {
                 let entry = entries.get(cand.entry_idx)?;
 
-                // MatchType resolution: Semantic badge if only found by semantic tier,
-                // Visual badge if only found by visual tier
                 let match_type = if cand.in_visual
                     && !cand.in_fuzzy
                     && !cand.in_bm25
@@ -1558,7 +1465,6 @@ impl SearchDispatcher {
             })
             .collect();
 
-        // 8. Ordering: best-match by default; explicit sort when requested.
         apply_sort(&mut results, sort);
         group_bursts(&mut results, |result| {
             metadata.burst_for_path(std::path::Path::new(&result.path))
@@ -1576,13 +1482,7 @@ impl SearchDispatcher {
             results.truncate(limit);
         }
 
-        // 9. Post-rank snippet extraction for top 20 files.
-        //
-        // `get_snippet_fast` reads plain text directly and otherwise only
-        // consults the extraction cache, so the query path never runs a PDF,
-        // Office or OCR extractor (the previous `read_text_content` fallback
-        // did, which is what made queries take seconds on document-heavy
-        // indexes).
+        // Snippets for the top results; never runs PDF/Office/OCR extractors on the query path.
         if with_snippets && !search_text.is_empty() {
             for item in results.iter_mut().take(20) {
                 if item.is_dir {
@@ -1619,27 +1519,10 @@ impl SearchDispatcher {
     }
 }
 
-/// Whether the active embedding model can rank this query at all.
-///
-/// The shipped static table has single-character pieces for ASCII letters, so a
-/// query it cannot represent — random letters (`kjhdfkhoqiuw`), or a script the
-/// vocabulary lacks — becomes a bag of single letters instead of a meaning. On a
-/// source-heavy corpus such vectors score **0.46-0.56** against unrelated files,
-/// above every floor that still keeps real matches, so no threshold can separate
-/// them. Skipping the tier is the honest answer: the keyword, fuzzy and folded
-/// tiers still run, and a result set that is empty is better than noise.
-///
-/// `None` granularity means the provider has no word-piece vocabulary to ask
-/// (the hashing estimator or the ONNX `smart` model); those keep the tier.
+/// False when the static table would spell the query letter by letter (meaningless
+/// vectors). `None` granularity (no word-piece vocab) keeps the tier.
 fn semantic_query_is_usable(model: &ModelRegistry, query: &str) -> bool {
-    /// Below this, the model is spelling the query out instead of reading it.
-    ///
-    /// Measured against the shipped table: words and natural language sit at
-    /// 2.3-6.0 characters per piece (`invoice` 2.33, `kubernetes` 2.5, `photo`
-    /// 5.0), while letter-spelled strings sit at 1.0-1.7 (`kjhdfkhoqiuw` and
-    /// `asdfghjklzxc` 1.71, Cyrillic 1.0). Short technical tokens the vocabulary
-    /// lacks (`ocr` 1.5, `tokio` 1.67, `src-tauri` 1.6) fall below it too; those
-    /// are exact-token searches that the lexical tiers answer.
+    /// Measured: words sit at 2.3-6.0 chars/piece, spelled-out strings at 1.0-1.7.
     const MIN_CHARS_PER_PIECE: f32 = 2.0;
     match model.token_granularity(query) {
         None => true,
@@ -1647,13 +1530,7 @@ fn semantic_query_is_usable(model: &ModelRegistry, query: &str) -> bool {
     }
 }
 
-/// Absolute cosine floor for a semantic-only candidate, by provider.
-///
-/// The values come from measuring similarity distributions on a 461-chunk
-/// corpus: the shipped table puts true matches at 0.40+ and unrelated words at
-/// 0.31-0.33; the hashing estimator is a trigram space where random text reaches
-/// ~0.33; a real ONNX embedding model keeps unrelated text near zero. The
-/// previous 0.28/0.12 pair admitted 25-50% of the chunks for a random query.
+/// Cosine floor for semantic-only candidates, measured per provider.
 fn semantic_only_floor(model: &ModelRegistry) -> f32 {
     if model.provider_name() == "static" && !model.has_static_table() {
         0.30
@@ -1664,21 +1541,12 @@ fn semantic_only_floor(model: &ModelRegistry) -> f32 {
     }
 }
 
-/// How many semantic-only results one query may add.
-///
-/// A compressed similarity band still has a tail: on a large index a few hundred
-/// units can clear any absolute floor. Bounding the count keeps vaguely related
-/// files from burying the lexical hits (#177) while keeping the strongest
-/// semantic matches.
+/// Caps semantic-only results so a vague tail can't bury lexical hits (#177).
 fn semantic_only_limit(limit: usize) -> usize {
     (limit / 10).clamp(1, 5)
 }
 
-/// Final score for a fused candidate.
-///
-/// RRF is normalized to `[0, 1]` before bonuses so scores are comparable
-/// regardless of how many tiers matched. The depth penalty is bounded (max
-/// `-0.10`) and can never push a score below zero.
+/// RRF normalized to `[0, 1]` plus bonuses; the depth penalty is at most -0.10, never below zero.
 fn finalize_score(
     rrf_score: f64,
     max_rrf: f64,
@@ -1706,26 +1574,25 @@ fn finalize_score(
         score += 0.15;
     }
 
-    // Smooth recency decay: +0.10 * exp(-age_days / 7)
+    // Recency: +0.10 * exp(-age_days / 7)
     let age_days = (now_sec.saturating_sub(entry.modified) as f64) / 86400.0;
     score += 0.10 * (-age_days / 7.0).exp();
 
-    // Frecency bonus: +0.08 * log1p(opens) * exp(-last_open_days / 14)
+    // Frecency: +0.08 * log1p(opens) * exp(-last_open_days / 14)
     let (opens, last_open) = usage;
     if opens > 0 {
         let last_open_days = (now_sec.saturating_sub(last_open) as f64) / 86400.0;
         score += 0.08 * (opens as f64).ln_1p() * (-last_open_days / 14.0).exp();
     }
 
-    // Bounded depth penalty: at most -0.10, saturating at depth 20.
+    // Depth penalty: at most -0.10, saturating at depth 20.
     let depth = path.components().count();
     score -= 0.10 * ((depth as f64) / 20.0).min(1.0);
 
     score.max(0.0)
 }
 
-/// Candidate membership for fusion. When the candidate list already covers
-/// every entry, skip the million-key hash set entirely.
+/// Skips the hash set when candidates cover every entry.
 struct CandidateSet {
     all: bool,
     indices: HashSet<usize>,
@@ -1749,8 +1616,7 @@ impl CandidateSet {
     }
 }
 
-/// True when the query can use the directory trie (`in:` or a leading
-/// directory-like token). Other queries skip the path-index build entirely.
+/// `in:` or a leading directory-like token; other queries skip the path index.
 fn query_needs_trie(query: &str) -> bool {
     let lowered = query.to_ascii_lowercase();
     if lowered.contains("in:") {
@@ -1763,10 +1629,7 @@ fn query_needs_trie(query: &str) -> bool {
         || first.starts_with("./")
 }
 
-/// Enumerates matches for `mode:exhaustive`, ordered by path.
-///
-/// Fuzzy and semantic tiers are deliberately skipped: they rank, they do not
-/// enumerate. The returned vector is capped only by the caller.
+/// Enumerates `mode:exhaustive` matches by path; ranking tiers are skipped.
 #[allow(clippy::too_many_arguments)]
 fn exhaustive_results(
     content_index: &Option<ContentIndex>,
@@ -1859,10 +1722,7 @@ fn exhaustive_results(
     results
 }
 
-/// Positive ext/size filters that can be pushed into the content index.
-///
-/// Only the first positive clause of each kind is pushed: it is a necessary
-/// condition for every result, so the pushdown can never drop a true match.
+/// Only the first positive clause of each kind is pushed, so no true match is dropped.
 fn content_pushdown(filters: &[Filter]) -> ContentFilters {
     let mut pushdown = ContentFilters::default();
     for filter in filters {
@@ -1888,7 +1748,7 @@ fn matches_all_compiled_filters(filters: &[CompiledFilter], entry: &FileEntry) -
     true
 }
 
-/// Pre-compiled filter that pre-lowercases strings to avoid per-entry allocation.
+/// Filter with strings pre-lowercased.
 #[derive(Clone)]
 enum CompiledFilter {
     Ext(String),
@@ -1929,8 +1789,7 @@ impl CompiledFilter {
             CompiledFilter::Kind(crate::query::ast::FileKind::Dir) => entry.is_dir,
             CompiledFilter::Kind(crate::query::ast::FileKind::File) => !entry.is_dir,
             CompiledFilter::Lang(lang) => matches_language(lang, entry.extension),
-            // Both needles are already lowercased when compiled, and these
-            // run once per file in the corpus, so match without allocating.
+            // Needles are pre-lowercased; this runs once per file.
             CompiledFilter::Name(name) => contains_ignore_case(&entry.name, name),
             CompiledFilter::Path(path_substr) => {
                 contains_ignore_case(&entry.path.to_string_lossy(), path_substr)
@@ -1940,16 +1799,7 @@ impl CompiledFilter {
     }
 }
 
-// Removed: replaced by CompiledFilter::from + CompiledFilter::matches
-
-// Removed: replaced by matches_all_compiled_filters + CompiledFilter
-
-/// Case-insensitive substring test with no allocation on the ASCII path.
-///
-/// These run once per file in the corpus on every filtered query, so a
-/// `to_lowercase()` per call was allocating once per file for a substring
-/// check. Non-ASCII pairs still get the exact Unicode behaviour by falling
-/// back to a lowercased comparison.
+/// Allocation-free on ASCII; non-ASCII falls back to lowercased comparison.
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -2101,15 +1951,11 @@ mod tests {
 
     #[test]
     fn semantic_policy_keeps_the_floor_inside_the_measured_gap() {
-        // No model pack installed: the hashing estimator works in a trigram
-        // space where random text reached ~0.33 on a real corpus.
         let hashing = ModelRegistry::new_static();
         assert_eq!(semantic_only_floor(&hashing), 0.30);
-        // The hashing estimator has no word-piece vocabulary to ask, so the
-        // tokenization gate must not disable the tier for it.
+        // No word-piece vocabulary, so the tokenization gate must not apply.
         assert!(semantic_query_is_usable(&hashing, "kjhdfkhoqiuw"));
 
-        // Semantic disabled: no vectors exist at all; keep the neutral default.
         let disabled = ModelRegistry::new_none();
         assert_eq!(semantic_only_floor(&disabled), 0.28);
     }
@@ -2127,14 +1973,8 @@ mod tests {
         use crate::embed::EMBEDDING_DIM;
         use crate::embed::table::StaticTable;
 
-        // A vocabulary shaped like the shipped table: single-letter pieces for
-        // ASCII letters, so random letters tokenize as a bag of characters
-        // instead of a word. Between them, gibberish outscored real matches on
-        // source-heavy corpora (#177).
+        // Single-letter pieces, like the shipped table (#177).
         let mut vocab: Vec<(&str, u32)> = vec![("[PAD]", 0), ("[UNK]", 1), ("invoice", 2)];
-        // Both the word-initial and the continuation form, as in the real
-        // vocabulary: that is what lets a random string become a full bag of
-        // one-character pieces.
         let letters = ["k", "j", "h", "d", "f", "o", "q", "i", "u", "w"];
         let continuations = [
             "##k", "##j", "##h", "##d", "##f", "##o", "##q", "##i", "##u", "##w",
@@ -2152,16 +1992,12 @@ mod tests {
         assert_eq!(model.token_granularity("kjhdfkhoqiuw"), Some(1.0));
         assert!(!semantic_query_is_usable(&model, "kjhdfkhoqiuw"));
 
-        // A whole word is one piece, so the tier stays available.
         assert_eq!(model.token_granularity("invoice"), Some(7.0));
         assert!(semantic_query_is_usable(&model, "invoice"));
 
-        // A script the vocabulary lacks embeds to zero: there is nothing to rank.
         assert_eq!(model.token_granularity("東京"), Some(0.0));
         assert!(!semantic_query_is_usable(&model, "東京"));
 
-        // The table is the provider most vulnerable to the compressed band, so
-        // it gets the highest floor.
         assert_eq!(semantic_only_floor(&model), 0.35);
     }
 
@@ -2208,11 +2044,9 @@ mod tests {
         let first = store.entries_snapshot();
         assert_eq!(first.len(), 1);
 
-        // Same generation: the cached list is reused, not rebuilt.
         let again = store.entries_snapshot();
         assert!(std::sync::Arc::ptr_eq(&first, &again));
 
-        // A mutation bumps the generation, so the next query must see it.
         store.add(entry("/two.txt"));
         let after = store.entries_snapshot();
         assert_eq!(after.len(), 2, "a new entry must appear after a mutation");
@@ -2454,7 +2288,7 @@ mod tests {
         assert_eq!(folded.results[0].path, path);
         assert_eq!(folded.results[0].match_type, MatchType::ContentFolded);
 
-        // Exact hits fill the limit, so the folded tier must not run/append.
+        // Exact hits fill the limit, so the folded tier must not run.
         let exact = SearchDispatcher::search_response_fast(
             "donutsmp",
             &metadata,
@@ -2506,7 +2340,6 @@ mod tests {
             None,
         );
 
-        // A normal display limit (e.g. 5) must not apply here.
         assert_eq!(results.len(), 12);
         assert!(results.len() > 5);
         let sorted = {
@@ -2529,8 +2362,7 @@ mod tests {
         let deep = entry(1, deep_path.to_str().unwrap(), "deep.rs");
         let shallow = entry(2, shallow_path.to_str().unwrap(), "shallow.rs");
 
-        // Equal relevance and metadata: only depth differs, so the shallower
-        // path must win.
+        // Only depth differs, so the shallower path must win.
         let deep_score = finalize_score(0.5, 0.5, &deep, deep_path, "zzz", now, (0, 0));
         let shallow_score = finalize_score(0.5, 0.5, &shallow, shallow_path, "zzz", now, (0, 0));
         assert!(
@@ -2538,7 +2370,6 @@ mod tests {
             "shallow {shallow_score} should beat deep {deep_score}"
         );
 
-        // A very deep but highly relevant file still beats a shallow weak one.
         let relevant_deep = entry(3, deep_path.to_str().unwrap(), "alpha.rs");
         let weak_shallow = entry(4, shallow_path.to_str().unwrap(), "other.rs");
         let relevant_score =
@@ -2551,7 +2382,6 @@ mod tests {
         );
         assert!(relevant_score >= 0.0);
 
-        // Scores never go negative, even for extremely deep unranked files.
         let very_deep = Path::new("/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z.rs");
         let bottom = finalize_score(0.0, 1.0, &deep, very_deep, "", now, (0, 0));
         assert_eq!(bottom, 0.0);
@@ -2565,8 +2395,7 @@ mod tests {
         let model = ModelRegistry::global();
         let query_vec = model.embed_to_i8("needle");
 
-        // Build a vector with a deliberately small positive cosine (~0.07):
-        // above the scanner's 0.05 prefilter, below either semantic floor.
+        // Cosine ~0.07: above the scanner's 0.05 prefilter, below either floor.
         let (idx, value) = query_vec
             .iter()
             .enumerate()
@@ -2659,7 +2488,6 @@ mod tests {
         let query_vec = model.embed_to_i8("needle");
 
         let mut units = UnitStore::new(model.dim);
-        // Unit 1: active model id
         units.add_unit(
             Unit {
                 id: 0,
@@ -2670,7 +2498,6 @@ mod tests {
             },
             &query_vec,
         );
-        // Unit 2: old/incompatible model id
         units.add_unit(
             Unit {
                 id: 1,
@@ -2703,7 +2530,6 @@ mod tests {
         .unwrap();
         let metadata = MetadataStore::with_db(db);
 
-        // 1. With semantic_enabled = true: only active model unit matches (node 1)
         let response = SearchDispatcher::search_response(
             "needle",
             &metadata,
@@ -2716,7 +2542,6 @@ mod tests {
         assert_eq!(response.results.len(), 1);
         assert!(response.results[0].path.ends_with("active.txt"));
 
-        // 2. With semantic_enabled = false: semantic search is skipped entirely
         let response_disabled = SearchDispatcher::search_response(
             "needle",
             &metadata,
@@ -2744,13 +2569,9 @@ mod tests {
         let target_vec = encoder.embed_text(query_text);
 
         let mut visual_store = VisualStore::new(VISUAL_DIM, encoder.model_id());
-        // Node 1: Visual-only generic image
         visual_store.add_or_update(1, 0x1111, &target_vec);
-        // Node 2: Lexical + Visual image
         visual_store.add_or_update(2, 0x2222, &target_vec);
-        // Node 3: Non-image file erroneously with visual vector
         visual_store.add_or_update(3, 0x3333, &target_vec);
-        // Node 4: Weak vector below cosine floor
         let inverted_vec: Vec<i8> = target_vec.iter().map(|&v| -v).collect();
         visual_store.add_or_update(4, 0x4444, &inverted_vec);
 
@@ -2795,7 +2616,6 @@ mod tests {
             0,
         );
 
-        // 1. Weak vector node 4 dropped by floor (< 0.20)
         assert!(
             response
                 .results
@@ -2804,7 +2624,6 @@ mod tests {
             "noise.jpg should be dropped by visual cosine floor"
         );
 
-        // 2. Non-image file node 3 must never be tagged as MatchType::Visual
         for r in &response.results {
             if r.path.ends_with("document.txt") {
                 assert_ne!(
@@ -2815,7 +2634,6 @@ mod tests {
             }
         }
 
-        // 3. Node 1 (IMG_0001.png) matched visually
         let img1 = response
             .results
             .iter()
@@ -2823,7 +2641,6 @@ mod tests {
             .expect("IMG_0001.png should be found via visual tier");
         assert_eq!(img1.match_type, MatchType::Visual);
 
-        // 4. Node 2 (red_cap.png) matched both lexically and visually, outranking visual-only
         let img2 = response
             .results
             .iter()
@@ -2876,8 +2693,7 @@ mod tests {
         assert_eq!(facets.types.values().sum::<usize>(), 100_000);
         assert_eq!(facets.time.values().sum::<usize>(), 100_000);
         assert_eq!(facets.size.values().sum::<usize>(), 100_000);
-        // Generous debug-mode guard; the release budget is measured by
-        // `examples/facet_bench.rs` and recorded in BENCHMARKS.md.
+        // Generous debug guard; the release budget lives in `examples/facet_bench.rs`.
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "facets at 100k took {elapsed:?}"

@@ -1,6 +1,4 @@
-//! Page tilt (`pipeline.estimate_skew`, `pipeline.rotate_page`): the angle
-//! whose horizontal ink profile changes most sharply row to row is the one
-//! that levels the text rows.
+//! Page tilt estimation and rotation (`pipeline.estimate_skew`, `pipeline.rotate_page`).
 
 use super::imageops::{Gray, resize};
 
@@ -10,10 +8,8 @@ const DESKEW_MAX: f64 = 45.0;
 /// Smaller tilts are left alone (the search step is 0.1).
 pub const DESKEW_MIN: f64 = 0.3;
 
-/// Rotates by `degrees` counter-clockwise about the centre, same size, like
-/// `cv2.warpAffine(getRotationMatrix2D((w/2, h/2), degrees, 1))` with
-/// bilinear sampling. `replicate`: edge pixels fill the corners (a page);
-/// otherwise 0 (an ink map).
+/// Rotates CCW about the centre with bilinear sampling (like `cv2.warpAffine`);
+/// `replicate` fills corners with edge pixels, else 0.
 pub fn rotate(gray: &Gray, degrees: f64, replicate: bool) -> Gray {
     let (sin, cos) = degrees.to_radians().sin_cos();
     let (cx, cy) = (gray.w as f64 / 2.0, gray.h as f64 / 2.0);
@@ -47,7 +43,6 @@ pub fn rotate(gray: &Gray, degrees: f64, replicate: bool) -> Gray {
     out
 }
 
-/// Ink map (255 = ink) of the page shrunk to `side` pixels.
 fn ink_thumb(gray: &Gray, side: usize) -> Gray {
     let s = side as f64 / gray.w.max(gray.h) as f64;
     let w = ((gray.w as f64 * s).round() as usize).max(1);
@@ -67,7 +62,7 @@ fn row_sharpness(ink: &Gray, degrees: f64) -> f64 {
     rows.windows(2).map(|p| (p[1] - p[0]).powi(2)).sum()
 }
 
-/// Best angle of `angles` (the first one on ties, like `max`).
+/// Best angle (first on ties, like `max`).
 fn best(ink: &Gray, angles: &[f64]) -> f64 {
     let scores: Vec<f64> = angles.iter().map(|&a| row_sharpness(ink, a)).collect();
     let mut at = 0;
@@ -84,9 +79,7 @@ fn steps(from: f64, to: f64, step: f64) -> Vec<f64> {
     (0..=n).map(|i| from + i as f64 * step).collect()
 }
 
-/// Degrees (counter-clockwise) that straighten the text rows: a 2 degree
-/// grid on a half-size thumbnail, then the two best angles and 0 refined in
-/// 0.5 and 0.1 degree steps on an 800 px thumbnail.
+/// CCW degrees that level text rows: coarse 2° grid, then 0.5°/0.1° refinement.
 pub fn estimate_skew(gray: &Gray) -> f64 {
     const SIDE: usize = 800;
     let fine = ink_thumb(gray, SIDE);

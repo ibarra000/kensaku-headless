@@ -19,19 +19,13 @@ use std::sync::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Process-wide OCR setting, mirroring [`crate::config::KensakuConfig::ocr_enabled`].
-///
-/// Image extraction reads this flag instead of taking a config lock, which
-/// keeps the parallel extraction phase independent of the config `RwLock`.
+/// Process-wide OCR flag so extraction never takes the config lock.
 static OCR_ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// Language codes to hand to Tesseract, mirroring
-/// [`crate::config::KensakuConfig::ocr_languages`]. Empty means "pick from the
-/// installed languages" (English first).
+/// Tesseract language codes; empty means pick from installed (English first).
 static OCR_LANGUAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Updates the process-wide OCR setting. Called whenever the config is loaded or
-/// saved so image indexing follows the user's choice immediately.
+/// Updates the process-wide OCR setting on config load/save.
 pub fn set_ocr_enabled(enabled: bool) {
     OCR_ENABLED.store(enabled, Ordering::SeqCst);
 }
@@ -49,25 +43,18 @@ pub fn ocr_languages() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// True when image OCR is allowed.
 pub fn ocr_enabled() -> bool {
     OCR_ENABLED.load(Ordering::SeqCst)
 }
 
-/// How the indexer treats a path's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexMode {
-    /// Names and paths only: never read or index file content.
+    /// Never read or index file content.
     NamesOnly,
-    /// Names, paths and content (the default).
     NameAndContent,
 }
 
-/// Process-wide copy of the directory-mode rules, mirroring
-/// [`crate::config::KensakuConfig::watched_dirs`] and
-/// [`crate::config::KensakuConfig::name_only_dirs`]. Normalized keys keep the
-/// crawl, watcher, embedding worker and extraction pipeline independent of the
-/// config `RwLock`, like the OCR and content-cap settings above.
+/// Normalized directory-mode rules, kept outside the config `RwLock`.
 struct ModeRules {
     watched: Vec<String>,
     names_only: Vec<String>,
@@ -76,8 +63,7 @@ struct ModeRules {
 static MODE_RULES: std::sync::RwLock<ModeRules> =
     std::sync::RwLock::new(ModeRules { watched: Vec::new(), names_only: Vec::new() });
 
-/// Canonical comparison key for a rule path: no trailing separator, forward
-/// slashes everywhere, and case-insensitive on Windows like the filesystem.
+/// Rule comparison key: no trailing separator, forward slashes, case-insensitive on Windows.
 pub fn rule_key(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let trimmed = raw.trim_end_matches(['/', '\\']);
@@ -89,18 +75,12 @@ pub fn rule_key(path: &Path) -> String {
     }
 }
 
-/// True when `rule` is `path` itself or one of its ancestor directories.
-/// The separator check keeps `/media-notes` out of `/media`.
+/// `rule` is `path` or an ancestor; the separator check keeps `/media-notes` out of `/media`.
 fn rule_covers(rule: &str, path: &str) -> bool {
     path == rule || path.strip_prefix(rule).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Resolves the effective mode from an explicit rule set. The deepest (most
-/// specific) matching rule wins, so a watched folder whose "names only" switch
-/// is off overrides a names-only ancestor.
-///
-/// Pure on purpose: the reconcile step uses it to compare the persisted rule
-/// set with the current one, file by file.
+/// Effective mode for `path`; the deepest matching rule wins. Pure so reconcile can diff rule sets.
 pub fn mode_from_rules(watched: &[String], names_only: &[String], path: &Path) -> IndexMode {
     let key = rule_key(path);
     let mut best: Option<(usize, IndexMode)> = None;
@@ -128,7 +108,6 @@ pub fn mode_from_rules(watched: &[String], names_only: &[String], path: &Path) -
         .unwrap_or(IndexMode::NameAndContent)
 }
 
-/// Replaces the process-wide rules from the current configuration.
 pub fn set_path_modes(watched: &[PathBuf], names_only: &[PathBuf]) {
     if let Ok(mut slot) = MODE_RULES.write() {
         slot.watched = watched.iter().map(|p| rule_key(p)).collect();
@@ -136,8 +115,7 @@ pub fn set_path_modes(watched: &[PathBuf], names_only: &[PathBuf]) {
     }
 }
 
-/// Backwards-compatible setter for callers that only have the names-only list.
-/// It preserves the watched roots already installed by [`set_path_modes`].
+/// Sets names-only dirs, keeping watched roots from [`set_path_modes`].
 pub fn set_name_only_dirs(dirs: Vec<PathBuf>) {
     let watched = MODE_RULES
         .read()
@@ -149,7 +127,6 @@ pub fn set_name_only_dirs(dirs: Vec<PathBuf>) {
     }
 }
 
-/// The effective mode for `path` under the current configuration.
 pub fn mode_for_path(path: &Path) -> IndexMode {
     MODE_RULES
         .read()
@@ -157,13 +134,11 @@ pub fn mode_for_path(path: &Path) -> IndexMode {
         .unwrap_or(IndexMode::NameAndContent)
 }
 
-/// True when `path`'s content must not be read or indexed.
 pub fn is_name_only_path(path: &Path) -> bool {
     mode_for_path(path) == IndexMode::NamesOnly
 }
 
-/// Process-wide content caps, mirroring KensakuConfig so the extraction
-/// pipeline (which runs outside the config RwLock) sees updates immediately.
+/// Process-wide content caps, read outside the config `RwLock`.
 static CONTENT_MAX_FILE_SIZE_BYTES: AtomicU64 = AtomicU64::new(20 * 1024 * 1024);
 static CONTENT_MAX_TEXT_BYTES: AtomicUsize = AtomicUsize::new(1_000_000);
 
@@ -191,16 +166,13 @@ pub fn content_max_text_bytes() -> usize {
     CONTENT_MAX_TEXT_BYTES.load(Ordering::SeqCst)
 }
 
-/// Replaces the opt-in external extractor registry and drops cached results so
-/// a config change is visible immediately.
+/// Replaces the external extractor registry and clears the cache.
 pub fn set_external_extractors(extractors: Vec<ExternalExtractor>) {
     external::set_extractors(extractors);
     clear_extraction_cache();
 }
 
-/// Drops every cached extraction. Called when OCR output may have changed
-/// (engine switch, OCR revision bump), so a re-queued image is really re-read
-/// instead of being served its old text from memory.
+/// Drops every cached extraction so changed OCR output is actually re-read.
 pub fn clear_cache() {
     clear_extraction_cache();
 }
@@ -234,39 +206,34 @@ pub enum DocumentFormat {
     Ods,
     Odp,
     Rtf,
-    /// RFC 822 / MIME email.
     Eml,
     /// Outlook OLE/MAPI email.
     Msg,
-    /// CSV and TSV: one line of text per row.
+    /// CSV/TSV: one line of text per row.
     Delimited,
-    /// Apache Parquet: schema plus the first rows, never the whole file.
+    /// Schema plus the first rows, never the whole file.
     Parquet,
     PlainText,
     Image,
     Unknown,
 }
 
-/// Sniffs the format using magic bytes first, falling back to file extension.
+/// Sniffs the format by magic bytes, falling back to extension.
 pub fn sniff_format(path: &Path) -> DocumentFormat {
     let mut header = [0u8; 16];
     if let Ok(mut f) = File::open(path)
         && let Ok(n) = f.read(&mut header)
         && n >= 4
     {
-        // PDF magic: %PDF-
         if header.starts_with(b"%PDF-") {
             return DocumentFormat::Pdf;
         }
-        // RTF magic: {\rtf
         if header.starts_with(b"{\\rtf") {
             return DocumentFormat::Rtf;
         }
-        // Parquet magic: PAR1
         if header.starts_with(b"PAR1") {
             return DocumentFormat::Parquet;
         }
-        // Image magic bytes
         if header.starts_with(b"\x89PNG")
             || header.starts_with(b"\xff\xd8\xff")
             || header.starts_with(b"GIF8")
@@ -275,9 +242,7 @@ pub fn sniff_format(path: &Path) -> DocumentFormat {
         {
             return DocumentFormat::Image;
         }
-        // ZIP magic: PK\x03\x04
         if header.starts_with(b"PK\x03\x04") {
-            // Differentiate by extension
             let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -296,7 +261,6 @@ pub fn sniff_format(path: &Path) -> DocumentFormat {
         }
     }
 
-    // Fallback to extension
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -328,12 +292,7 @@ pub fn sniff_format(path: &Path) -> DocumentFormat {
     }
 }
 
-/// Extracts text content and metadata from documents according to ARCHITECTURE §5.2 content policy:
-/// - Max file size: 20MB (files above 20MB are metadata-only).
-/// - Extracted content capped at max_bytes (default 1MB).
-/// - Panic-isolated with std::panic::catch_unwind.
-///
-/// Global LRU cache for extraction results, keyed by (path, size, mtime).
+/// LRU of extraction results keyed by (path, size, mtime).
 static EXTRACTION_CACHE: std::sync::OnceLock<Mutex<ExtractionCache>> = std::sync::OnceLock::new();
 
 struct ExtractionCache {
@@ -353,7 +312,6 @@ impl ExtractionCache {
 
     fn get(&mut self, key: &(std::path::PathBuf, u64, u64)) -> Option<DocumentExtract> {
         if let Some(val) = self.map.get(key) {
-            // Move to back (most recently used)
             if let Some(pos) = self.order.iter().position(|k| k == key) {
                 self.order.remove(pos);
             }
@@ -375,17 +333,11 @@ impl ExtractionCache {
 }
 
 fn get_extraction_cache() -> &'static Mutex<ExtractionCache> {
-    // A small cache is deliberate: each entry can hold up to a megabyte of
-    // text, and the crawl no longer depends on cache hits (it extracts once and
-    // feeds both the lexical and semantic index). Keeping 16 entries bounds
-    // this at a few megabytes instead of tens of megabytes.
+    // Small on purpose: entries can be ~1 MB each and the crawl doesn't rely on hits.
     EXTRACTION_CACHE.get_or_init(|| Mutex::new(ExtractionCache::new(16)))
 }
 
-/// Cache key for a path: `(path, size, mtime)`.
-///
-/// Shared by [`extract_document`] and [`cached_document`] so a lookup never
-/// disagrees with what was inserted.
+/// Cache key `(path, size, mtime)`, shared by insert and lookup.
 fn cache_key(path: &Path) -> Option<(PathBuf, u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let size = meta.len();
@@ -398,21 +350,13 @@ fn cache_key(path: &Path) -> Option<(PathBuf, u64, u64)> {
     Some((path.to_path_buf(), size, mtime))
 }
 
-/// Returns a previously extracted document from the LRU cache, if present.
-///
-/// This is a **cache-only** lookup: it never reads, parses, OCRs or otherwise
-/// extracts anything. Query-time callers use it so a snippet can be produced
-/// for a document without paying the PDF/Office/OCR cost. Returns `None` when
-/// the path is not cached (or cannot be stat'ed).
+/// Cache-only lookup for query-time snippets; never extracts anything.
 pub fn cached_document(path: &Path) -> Option<DocumentExtract> {
     let key = cache_key(path)?;
     let mut cache = get_extraction_cache().lock().ok()?;
     cache.get(&key)
 }
 
-/// Inserts an extraction result into the process-wide cache.
-///
-/// Test-only: production inserts happen in [`extract_document`].
 #[cfg(test)]
 pub fn insert_cached_document(path: &Path, document: DocumentExtract) {
     let Some(key) = cache_key(path) else {
@@ -422,9 +366,7 @@ pub fn insert_cached_document(path: &Path, document: DocumentExtract) {
     cache.insert(key, document);
 }
 
-/// Upper bound for a single document extraction. Plain documents use a snappy
-/// 15 s timeout; OCR candidates (images and PDFs) get 45 s to account for
-/// deep neural net inference queues and complex screenshot recognition.
+/// Per-document extraction timeout: 15 s plain, 45 s for OCR candidates.
 fn extraction_timeout_for(file_size: u64, is_ocr_candidate: bool) -> Duration {
     let base = if is_ocr_candidate { 45 } else { 15 };
     let extra = file_size / (5 * 1024 * 1024) * 2;
@@ -432,12 +374,10 @@ fn extraction_timeout_for(file_size: u64, is_ocr_candidate: bool) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// How long a caller waits for a free extraction slot before giving up on the
-/// file for this crawl. This is backpressure, not a work timeout: without it a
-/// stalled document could permanently consume every slot.
+/// Backpressure wait for a free slot, so a stalled document cannot hold every slot forever.
 const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Number of concurrent extractions (and therefore concurrent OCR processes).
+/// Concurrent extractions (and so concurrent OCR processes).
 pub(crate) fn extraction_concurrency() -> usize {
     extraction_concurrency_for(
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
@@ -445,16 +385,11 @@ pub(crate) fn extraction_concurrency() -> usize {
 }
 
 fn extraction_concurrency_for(cores: usize) -> usize {
-    // Each OCR session/child uses one CPU thread. Leave capacity for the UI,
-    // crawler and embedding worker; tiny machines must still make progress.
+    // One CPU thread per OCR child; leave headroom for the crawler and embedder.
     cores.saturating_sub(2).clamp(1, 8)
 }
 
-/// Bounded slot pool paired with the extraction thread pool.
-///
-/// Implemented via a condition variable and atomic counting to eliminate
-/// mutex-held receiver serialization: multiple callers can wait simultaneously
-/// without starving each other, and freed slots wake waiting callers immediately.
+/// Bounded slot pool (condvar + atomic count) paired with the extraction thread pool.
 struct SlotPool {
     available: Mutex<usize>,
     cvar: Condvar,
@@ -511,14 +446,12 @@ fn slot_pool() -> &'static SlotPool {
     SLOT_POOL.get_or_init(|| SlotPool::new(extraction_concurrency()))
 }
 
-/// Dedicated pool for extraction work.
 static EXTRACTION_POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
 
 fn extraction_pool() -> Option<&'static rayon::ThreadPool> {
     EXTRACTION_POOL
         .get_or_init(|| {
-            // Share the slot budget with the workers, including timed-out
-            // extractions which continue running until they release their slot.
+            // Share the slot budget, including timed-out work still holding a slot.
             match rayon::ThreadPoolBuilder::new()
                 .num_threads(extraction_concurrency())
                 .thread_name(|index| format!("kensaku-extract-{}", index))
@@ -537,14 +470,13 @@ fn extraction_pool() -> Option<&'static rayon::ThreadPool> {
         .as_ref()
 }
 
-/// Paths that already produced a timeout warning, so a permanently stuck
-/// document is reported once instead of on every crawl.
+/// Paths already warned about timing out, so a stuck document is reported once.
 static TIMEOUT_WARNED: std::sync::OnceLock<Mutex<HashSet<PathBuf>>> = std::sync::OnceLock::new();
 
 fn warn_extraction_timeout(path: &Path, timeout: Duration) {
     let warned = TIMEOUT_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
     let mut warned = warned.lock().unwrap();
-    // Keep the bookkeeping bounded on systems with many broken documents.
+    // Bounded on systems with many broken documents.
     if warned.len() >= 4096 {
         warned.clear();
     }
@@ -557,8 +489,7 @@ fn warn_extraction_timeout(path: &Path, timeout: Duration) {
     }
 }
 
-/// Reported once per path, and at most a handful of times per process, so a
-/// broken plugin does not flood the log during a crawl.
+/// Rate-limited per path and per process.
 fn warn_external_failure(path: &Path, error: &str) {
     external::record_failure(path, error);
     use std::sync::Mutex;
@@ -579,8 +510,7 @@ fn warn_external_failure(path: &Path, error: &str) {
     }
 }
 
-/// Reported at most a handful of times so a saturated crawl does not flood the
-/// log once per file.
+/// Rate-limited so a saturated crawl does not log once per file.
 fn warn_slot_saturation(path: &Path) {
     use std::sync::atomic::AtomicUsize;
     static WARNED: AtomicUsize = AtomicUsize::new(0);
@@ -597,10 +527,7 @@ pub fn extract_document(path: &Path, max_bytes: u64) -> Option<DocumentExtract> 
     extract_document_checked(path, max_bytes).0
 }
 
-/// Like [`extract_document`], plus whether the extraction was *incomplete*:
-/// it timed out, found every slot busy, or needed an OCR engine that could not
-/// run. The indexer keeps such files pending and retries them instead of
-/// recording "no text" for good.
+/// Like [`extract_document`], plus whether it was incomplete (timeout, no slot, OCR unavailable) and should be retried.
 pub fn extract_document_checked(path: &Path, max_bytes: u64) -> (Option<DocumentExtract>, bool) {
     let retry = std::sync::Arc::new(AtomicBool::new(false));
     let document = extract_document_tracked(path, max_bytes, &retry);
@@ -621,9 +548,7 @@ fn extract_document_tracked(
         .ok()?
         .as_secs();
 
-    // Content policy: metadata-only above the configured file-size cap.
-    // CSV/TSV/Parquet are sampled from the head, so their cost does not grow
-    // with file size and a huge export is still worth indexing.
+    // Metadata-only above the size cap, except head-sampled CSV/TSV/Parquet.
     let head_sampled = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -632,20 +557,14 @@ fn extract_document_tracked(
         return None;
     }
 
-    // External extractors are opt-in and keyed by extension/MIME. Resolve
-    // them before the OCR gate so a user-supplied plugin can still process an
-    // image when the built-in OCR tier is disabled.
+    // Resolve external extractors before the OCR gate so plugins can handle images with OCR off.
     let external = external::find(path);
 
-    // OCR is a user setting: when it is off, images must never produce text.
-    // This runs before the cache lookup so a previously cached OCR result is
-    // not reused after the setting is turned off. The sniff is only needed on
-    // this path; the normal flow below still checks the cache first.
+    // OCR off: images never produce text; checked before the cache so stale OCR text isn't reused.
     if external.is_none() && !ocr_enabled() && sniff_format(path) == DocumentFormat::Image {
         return None;
     }
 
-    // Check cache first
     let cache_key = (path.to_path_buf(), file_size, mtime);
     {
         let mut cache = get_extraction_cache().lock().unwrap();
@@ -659,12 +578,8 @@ fn extract_document_tracked(
     let is_ocr = format == DocumentFormat::Image || format == DocumentFormat::Pdf;
     let timeout = extraction_timeout_for(file_size, is_ocr);
 
-    // Run the extraction on the dedicated pool and time it out. On timeout the
-    // file stays pending (or skipped) and is retried on a later crawl; nothing
-    // is cached, so a transient stall is not sticky.
-    //
-    // A slot is acquired first and moved into the task, so timed-out work can
-    // never pile up beyond the pool size (see `SlotPool`).
+    // Timed-out files are retried later and not cached. The slot moves into the
+    // task so timed-out work can't exceed the pool size.
     let result = match (extraction_pool(), slot_pool().acquire()) {
         (Some(pool), Some(slot)) => {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -673,12 +588,9 @@ fn extract_document_tracked(
             let worker_retry = std::sync::Arc::clone(retry);
             pool.spawn(move || {
                 crate::util::priority::apply_current();
-                // Keep the slot alive for the real duration of the work, even
-                // if the caller stopped waiting.
+                // Hold the slot for the real duration, even if the caller stopped waiting.
                 let _slot = slot;
-                // Catch panics here: a panic escaping a `rayon::spawn` task
-                // reaches rayon's panic handler (which aborts by default), and
-                // a malformed document must never take the app down.
+                // A panic escaping `rayon::spawn` aborts; malformed documents must not crash.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     extract_document_inner(
                         &worker_path,
@@ -696,7 +608,7 @@ fn extract_document_tracked(
                     );
                     None
                 });
-                // Ignore send errors: the caller may have timed out already.
+                // The caller may have timed out already.
                 let _ = tx.send(result);
             });
 
@@ -717,20 +629,17 @@ fn extract_document_tracked(
                 }
             }
         }
-        // Every slot stayed busy for the whole wait: leave the file pending
-        // rather than adding to an unbounded queue.
+        // Every slot stayed busy: leave the file pending rather than queue unboundedly.
         (Some(_), None) => {
             warn_slot_saturation(path);
             retry.store(true, Ordering::SeqCst);
             None
         }
-        // Pool creation failed (rare); fall back to inline extraction.
+        // Pool creation failed (rare): extract inline.
         (None, _) => extract_document_inner(path, capped_bytes, format, file_size, external, retry),
     };
 
-    // Cache the result. Very large documents are skipped: the cache exists for
-    // query-time snippets and repeated small extractions, not to pin megabytes
-    // of text per entry.
+    // Very large documents are not cached.
     if let Some(ref res) = result
         && res.text.len() <= 256 * 1024
         && !retry.load(Ordering::SeqCst)
@@ -751,10 +660,7 @@ fn extract_document_inner(
     external: Option<ExternalExtractor>,
     retry: &AtomicBool,
 ) -> Option<DocumentExtract> {
-    // OCR could not run, but an engine *should* be usable (it was a moment
-    // ago, or is still loading): retry later. When no engine exists at all
-    // the file is done for now; enabling one re-queues every image through
-    // the OCR signature (see `IndexerManager::sync_ocr`).
+    // Retry only if an engine should be usable; enabling one later re-queues via the OCR signature.
     let ocr_retry = || {
         if crate::ocr::usable_engine() != crate::ocr::NONE {
             retry.store(true, Ordering::SeqCst);
@@ -866,16 +772,13 @@ fn extract_document_inner(
             })
         }
         DocumentFormat::Image => {
-            // Check the flag here as well: the inline fallback path and any
-            // direct caller must not run OCR when it is disabled.
+            // Also guards the inline fallback and direct callers.
             if !ocr_enabled() {
                 return None;
             }
             let text = match image::ocr_image(path) {
                 crate::ocr::OcrOutcome::Text(text) => text,
-                // An empty document is a real answer ("this photo has no
-                // text"): it replaces stale OCR text and lets the indexer
-                // mark the image done.
+                // No text is a real answer: replaces stale OCR text and marks the image done.
                 crate::ocr::OcrOutcome::NoText => String::new(),
                 crate::ocr::OcrOutcome::Unavailable => {
                     ocr_retry();
@@ -912,13 +815,7 @@ fn extract_document_inner(
             })
         }
         DocumentFormat::PlainText | DocumentFormat::Unknown => {
-            // Large plain text: read a head and a tail within the configured
-            // content budget.
-            //
-            // This used to hard-code 1 MB / 512 KB + 512 KB, ignoring
-            // `content_max_text_bytes` entirely, so the "deep content" setting
-            // could not reach past a megabyte and the middle of every large
-            // file was silently unsearchable.
+            // Large plain text: head and tail within the configured content budget.
             let budget = capped_bytes.max(1024);
             if file_size > budget as u64 {
                 let half = budget / 2;
@@ -943,8 +840,7 @@ fn extract_document_inner(
                     0
                 };
                 tail_bytes.truncate(n_tail);
-                // Start the tail on a character boundary (skip continuation
-                // bytes left by cutting a multi-byte sequence in half).
+                // Start the tail on a character boundary.
                 let mut tail_start = 0;
                 while tail_start < tail_bytes.len().min(3)
                     && (tail_bytes[tail_start] & 0xC0) == 0x80
@@ -960,8 +856,7 @@ fn extract_document_inner(
                 );
 
                 let combined = if markdown::is_markdown(path) {
-                    // Keep the existing sampling policy; do not carry fence state
-                    // across content omitted between the two samples.
+                    // Don't carry fence state across the omitted middle.
                     format!(
                         "{}\n\n... [content omitted] ...\n\n{}",
                         markdown::strip(&head_str),
@@ -1001,7 +896,6 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// A temp file that removes itself on drop.
     struct TempFile {
         path: PathBuf,
     }
@@ -1118,8 +1012,7 @@ mod tests {
         let file = TempFile::new("pdf", b"%PDF-1.4\n");
         let (result, elapsed) = extract(&file.path);
 
-        // A header-only document may fail to load (None) or load as an empty
-        // document; either way it must not panic or report pages with content.
+        // A header-only document may load or not, but must not panic or report content.
         if let Some(doc) = &result {
             assert_eq!(doc.page_count, Some(0));
             assert!(doc.text.is_empty(), "unexpected text: {:?}", doc.text);
@@ -1176,7 +1069,6 @@ mod tests {
         let file = TempFile::new("txt", b"on-disk text that must never be read");
         let path = &file.path;
 
-        // Nothing has been extracted for this unique path yet.
         assert!(
             cached_document(path).is_none(),
             "a cold cache must not extract on lookup"
@@ -1189,9 +1081,7 @@ mod tests {
 
     #[test]
     fn image_extraction_is_disabled_when_ocr_is_off() {
-        // A real, decodable PNG: the result must be `None` because of the
-        // setting, not because the file is invalid. Tesseract may or may not
-        // be installed, so this never asserts on extracted text.
+        // A valid PNG, so `None` is due to the setting; never asserts on OCR text.
         let path = TempFile::path_for("png");
         ::image::RgbImage::from_pixel(20, 20, ::image::Rgb([12, 34, 56]))
             .save_with_format(&path, ::image::ImageFormat::Png)

@@ -1,14 +1,12 @@
 use mail_parser::decoders::html::html_to_text;
 use std::path::Path;
 
-/// Trims extracted text to `max_bytes` without splitting a character.
 fn cap(mut out: String, max_bytes: usize) -> String {
     let keep = super::delimited::clip_to_char_boundary(&out, max_bytes).len();
     out.truncate(keep);
     out
 }
 
-/// Extracts searchable text from an Outlook `.msg` (OLE/MAPI) file.
 pub fn extract_msg(path: &Path, max_bytes: usize) -> Option<String> {
     let outlook = msg_parser::Outlook::from_path(path).ok()?;
     let mut out = String::new();
@@ -30,10 +28,7 @@ pub fn extract_msg(path: &Path, max_bytes: usize) -> Option<String> {
     push_msg_people(&mut out, "Cc:", &outlook.cc);
     push_msg_people(&mut out, "Bcc:", &outlook.bcc);
 
-    // Many messages have no plain-text body (PidTagBody), only HTML
-    // (PidTagHtml) or compressed RTF (PidTagRtfCompressed). The RTF only
-    // yields text when Outlook generated it from HTML (`\fromhtml1`); a native
-    // rich-text body has no embedded HTML and is still missed.
+    // Fall back to HTML, then HTML-derived RTF (`\fromhtml1`); native rich text is still missed.
     let body = if !outlook.body.trim().is_empty() {
         outlook.body.clone()
     } else if !outlook.html.trim().is_empty() {
@@ -65,12 +60,7 @@ pub fn extract_msg(path: &Path, max_bytes: usize) -> Option<String> {
     Some(cap(out, max_bytes))
 }
 
-/// The HTML body as text. msg_parser renders binary MAPI properties as hex,
-/// and `PidTagHtml` is binary in Outlook's own files, so the field usually
-/// holds hex; writers that store it as a string property give the HTML as-is.
-/// Real HTML contains `<`, which is not a hex digit, so a successful decode
-/// identifies the binary form. The bytes are in the message's code page;
-/// UTF-8 is assumed, so other code pages lose their non-ASCII characters.
+/// HTML body as text; binary `PidTagHtml` arrives hex-encoded (UTF-8 assumed).
 fn msg_html(html: &str) -> String {
     match hex::decode(html) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -78,9 +68,7 @@ fn msg_html(html: &str) -> String {
     }
 }
 
-/// One labelled line for `.msg` people. Exchange-internal sender IDs
-/// (`/O=EXCHANGELABS/...`) are not addresses, so only values with `@` are
-/// kept, and an address equal to the display name is written once.
+/// One labelled line for `.msg` people; only values with `@` are addresses (skips Exchange IDs).
 fn push_msg_people(out: &mut String, label: &str, people: &[msg_parser::Person]) {
     let mut line = String::new();
     for person in people {
@@ -100,7 +88,6 @@ fn push_msg_people(out: &mut String, label: &str, people: &[msg_parser::Person])
     }
 }
 
-/// Extracts searchable text from an `.eml` (RFC 822 / MIME) file.
 pub fn extract_eml(path: &Path, max_bytes: usize) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let message = mail_parser::MessageParser::default().parse(&bytes)?;
@@ -140,10 +127,7 @@ pub fn extract_eml(path: &Path, max_bytes: usize) -> Option<String> {
     Some(cap(out, max_bytes))
 }
 
-/// One labelled line for `.eml` people.
-///
-/// Groups are kept both as a name (`Team:`) and as their members: the index
-/// should match a search for the group and for an individual sender inside it.
+/// One labelled line for `.eml` people; groups keep both the name and the members.
 fn push_people(out: &mut String, label: &str, people: Option<mail_parser::AddressList<'_>>) {
     let Some(list) = people else {
         return;
@@ -188,7 +172,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A temp file that removes itself on drop.
     struct Fixture(PathBuf);
 
     impl Drop for Fixture {
@@ -353,8 +336,7 @@ mod tests {
         );
     }
 
-    /// Builds a minimal `.msg`: an OLE compound file whose root storage holds
-    /// one `__substg1.0_<prop id><prop type>` stream per MAPI property.
+    /// Builds a minimal `.msg`: OLE root with one `__substg1.0_*` stream per MAPI property.
     fn msg_bytes(props: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write;
         let mut file = cfb::CompoundFile::create_with_version(
@@ -370,14 +352,11 @@ mod tests {
         file.into_inner().into_inner()
     }
 
-    /// A `PT_UNICODE` property value: UTF-16LE, as Outlook writes strings.
     fn utf16(s: &str) -> Vec<u8> {
         s.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
 
-    /// A `PidTagRtfCompressed` value in the uncompressed ("MELA") variant of
-    /// MS-OXRTFCP. Outlook normally writes the LZ77 ("LZFu") variant; msg_parser
-    /// decompresses both to the same RTF.
+    /// `PidTagRtfCompressed` in the uncompressed ("MELA") MS-OXRTFCP variant.
     fn rtf_uncompressed(rtf: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(rtf.len() as u32 + 12).to_le_bytes()); // CompSize
@@ -423,8 +402,7 @@ mod tests {
 
     #[test]
     fn msg_rtf_only_body_is_recovered_from_embedded_html() {
-        // RTF that Outlook generated from HTML (`\fromhtml1`): the original
-        // tags sit in `\*\htmltag` groups, the text in `\htmlrtf0` regions.
+        // Outlook HTML-derived RTF (`\fromhtml1`).
         let rtf = r"{\rtf1\ansi\ansicpg1252\fromhtml1 \deff0{\fonttbl{\f0\fswiss Arial;}}
 {\*\htmltag19 <html>}{\*\htmltag50 <body>}{\*\htmltag64 <p>}\htmlrtf {\htmlrtf0 Lunch moved to Thursday.\htmlrtf }\htmlrtf0 {\*\htmltag72 </p>}{\*\htmltag58 </body>}{\*\htmltag27 </html>}}";
         let fx = bytes_fixture(
@@ -442,8 +420,7 @@ mod tests {
 
     #[test]
     fn msg_without_recoverable_body_keeps_headers_only() {
-        // Native rich text, not converted from HTML: no `\fromhtml1`, so there
-        // is no embedded HTML to recover. Known limitation.
+        // Native rich text has no embedded HTML: known limitation.
         let native_rtf = rtf_uncompressed(r"{\rtf1\ansi\deff0 Only in rich text.\par}");
         let cases: [&[(&str, &[u8])]; 3] = [
             &[],

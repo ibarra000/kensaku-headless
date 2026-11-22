@@ -11,7 +11,6 @@ fn main() {
     println!("=== Kensaku Benchmark ===");
     println!("Root: {}", root.display());
 
-    // Phase 1: Walk
     let t0 = Instant::now();
     let excluded: Vec<String> = vec![
         "node_modules".into(),
@@ -29,10 +28,8 @@ fn main() {
         entries.len() as f64 / (walk_ms / 1000.0)
     );
 
-    // Phase 2: Use entries directly (skip SQLite for benchmark speed)
     println!("Metadata store build: skipped (using entries directly)");
 
-    // Phase 3: Fuzzy search benchmarks
     let queries = [
         "main", "index", "config", "search", "mod", "content", "metadata", "watcher",
     ];
@@ -45,11 +42,9 @@ fn main() {
     let mut max_ms = 0.0f64;
 
     for q in &queries {
-        // Warm up
         let mut fs = FuzzySearcher::new();
         let _ = fs.search(q, all_entries, &candidate_indices, 50);
 
-        // Benchmark (10 runs)
         let mut times = Vec::new();
         for _ in 0..10 {
             let mut fs = FuzzySearcher::new();
@@ -74,7 +69,6 @@ fn main() {
     println!("  Best single query: {:.3} ms", min_ms);
     println!("  Worst single query: {:.3} ms", max_ms);
 
-    // Phase 4: Memory estimate
     println!("\n--- Memory Estimate ---");
     println!(
         "  FileEntry size: {} bytes",

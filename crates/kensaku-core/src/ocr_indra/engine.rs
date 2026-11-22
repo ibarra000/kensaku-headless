@@ -1,9 +1,5 @@
-//! The Indra OCR pipeline on ONNX Runtime (`pipeline.OrtOCR`), reduced to
-//! what search needs: the page turned upright and
-//! straightened, text lines detected, each line routed to its script's
-//! recognizer and greedily CTC-decoded, lines in reading order. Layout,
-//! markdown, math and the n-gram language model of the Python package are
-//! left out.
+//! Indra OCR pipeline on ONNX Runtime (`pipeline.OrtOCR`), reduced to deskew,
+//! line detection, per-script recognition and reading order.
 
 use super::imageops::{
     Crop, Gray, LineBox, crop_line, decode_lines, is_dark_line, orient_input, pad_batch,
@@ -16,23 +12,19 @@ use ort::session::Session;
 use ort::value::Tensor;
 use std::path::Path;
 
-/// Second detection pass when lines are this small (input pixels), scaled so
-/// the median line becomes ADAPTIVE_TARGET_H.
+/// Second detection pass when lines are this small, scaling the median to ADAPTIVE_TARGET_H.
 const ADAPTIVE_MIN_H: f32 = 9.0;
 const ADAPTIVE_TARGET_H: f32 = 12.0;
 const ADAPTIVE_MAX_SIDE: usize = 2048;
 const PREVIEW_SIDE: usize = 1600;
 const ORIENT_SIDE: usize = 768;
-/// A turn is applied only above this probability: a wrong turn loses the page.
+/// Min probability to apply a turn: a wrong turn loses the page.
 const ORIENT_MIN: f32 = 0.95;
-/// orient.onnx class: the page is set in vertical columns (Chinese, Japanese).
+/// orient.onnx class for vertical columns (CJK).
 const VERTICAL: usize = 4;
-/// A line under this mean CTC peak probability gets no text (rules,
-/// checkboxes and empty fields read as "-", "I", "1").
+/// Lines below this mean CTC peak probability are dropped (rules, checkboxes).
 const MIN_CONF: f32 = 0.5;
-/// The script classifier routes a line to one recognizer above this
-/// probability; below it the base recognizer reads it too and the more
-/// confident reading wins.
+/// Below this script-classifier probability, the base recognizer also reads the line.
 const ROUTE_SURE: f32 = 0.95;
 
 struct Group {
@@ -62,7 +54,7 @@ fn session(env: &ort::environment::Environment, path: &Path, threads: usize) -> 
         .map_err(|e| fail(&e))?
         .with_inter_threads(1)
         .map_err(|e| fail(&e))?
-        // Line batches change shape on every call; the arena only grows.
+        // Line batches change shape every call; the arena only grows.
         .with_execution_providers([ort::ep::CPU::default()
             .with_arena_allocator(false)
             .build()])
@@ -71,16 +63,15 @@ fn session(env: &ort::environment::Environment, path: &Path, threads: usize) -> 
         .map_err(|e| fail(&e))
 }
 
-/// One reading of a line: text, mean peak probability.
+/// (text, mean peak probability)
 type Reading = (String, f32);
 
-/// What one page produced: the text plus enough counters to tell a detector
-/// that found nothing from a recognizer that read nothing.
+/// Counters distinguish "detector found nothing" from "recognizer read nothing".
 pub struct ReadResult {
     pub text: String,
     /// Line boxes the detector returned.
     pub detected: usize,
-    /// Lines that produced kept text after confidence and leader filtering.
+    /// Lines kept after confidence and leader filtering.
     pub read: usize,
 }
 
@@ -138,13 +129,11 @@ impl Engine {
         })
     }
 
-    /// The page's text, one detected line per line, in reading order.
     pub fn read(&mut self, page: &Gray) -> Result<ReadResult, String> {
         if page.w < 2 || page.h < 2 {
             return Ok(ReadResult::empty());
         }
-        // The orientation model reads the preview straightened by its row
-        // angle (a tilted page could read as turned).
+        // Orientation reads the deskewed preview (a tilted page could read as turned).
         let small = preview(page, PREVIEW_SIDE);
         let mut skew = estimate_skew(&small);
         let turn = if skew.abs() >= DESKEW_MIN {
@@ -157,7 +146,6 @@ impl Engine {
             k => (0..k).fold(g.clone(), |g, _| g.rot90_cw()),
         };
         let mut upright = quarter(page);
-        // After a quarter turn the rows were columns: measure again.
         if turn % 2 == 1 || turn == VERTICAL {
             skew = estimate_skew(&quarter(&small));
         }
@@ -179,7 +167,6 @@ impl Engine {
                 texts.push(text);
             }
         }
-        // A right-to-left page reads its right column first: order mirrored.
         if rtl {
             let w = upright.w as f32;
             for b in &mut kept {
@@ -199,8 +186,7 @@ impl Engine {
         })
     }
 
-    /// Quarter turns clockwise that make the page upright, or VERTICAL, from
-    /// the page preview.
+    /// Clockwise quarter turns to upright, or VERTICAL.
     fn orientation(&mut self, page: &Gray) -> Result<usize, String> {
         let Some(orient) = self.orient.as_mut() else {
             return Ok(0);
@@ -251,7 +237,6 @@ impl Engine {
         Ok(boxes)
     }
 
-    /// Text and confidence per line box (`OrtOCR.recognize`).
     fn recognize(&mut self, page: &Gray, boxes: &[LineBox], vertical: bool) -> Result<Vec<Reading>, String> {
         let dark: Vec<bool> = boxes.iter().map(|b| is_dark_line(page, b)).collect();
         let crops: Vec<Crop> = boxes
@@ -316,10 +301,7 @@ impl Engine {
             }
         }
 
-        // Fallback for lines that yielded no text from specialized recognizers:
-        // try the comprehensive base recognizer (`rec.onnx` + `vocab`) which includes
-        // full Cyrillic, Latin, Greek, math, and punctuation. This ensures misrouted
-        // or out-of-vocabulary scripts are never silently dropped.
+        // Lines empty after specialized recognizers retry on the base recognizer so misrouted scripts aren't dropped.
         let empty_lines: Vec<usize> = (0..crops.len())
             .filter(|&j| best[j].0.trim().is_empty())
             .collect();
@@ -343,8 +325,7 @@ impl Engine {
         Ok(best)
     }
 
-    /// Per line: the group whose recognizer reads it (None = base) and
-    /// whether the classifier is sure.
+    /// Per line: recognizer group (None = base) and whether the classifier is sure.
     fn line_groups(&mut self, crops: &[Crop]) -> Result<(Vec<Option<usize>>, Vec<bool>), String> {
         let mut names = vec![None; crops.len()];
         let mut sure = vec![true; crops.len()];
@@ -388,8 +369,7 @@ fn widths_tensor(batch: &[&Crop]) -> Result<Tensor<i64>, String> {
     Tensor::from_array(([batch.len() as i64], widths)).map_err(|e| e.to_string())
 }
 
-/// Runs a CTC recognizer on a batch and greedily decodes each line: repeats
-/// and blanks dropped, confidence = mean peak probability of what is kept.
+/// Greedy CTC decode; confidence = mean peak probability of kept tokens.
 fn run_ctc(session: &mut Session, batch: &[&Crop]) -> Result<Vec<(Vec<i64>, f32)>, String> {
     let out = session
         .run(ort::inputs![

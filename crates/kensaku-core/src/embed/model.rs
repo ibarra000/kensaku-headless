@@ -6,21 +6,14 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 pub const EMBEDDING_DIM: usize = 256;
-/// Id of the hashing estimator used when the real model files are unavailable.
+/// Hashing estimator, used when real model files are unavailable.
 pub const DEFAULT_MODEL_ID: u32 = 1;
-/// Id of the real `potion-base-8M` static embedding table.
+/// Real `potion-base-8M` static table.
 pub const REAL_MODEL_ID: u32 = 2;
-/// Id of the optional ONNX smart embedding pack (`bge-small-en-v1.5`).
+/// Optional ONNX smart pack (`bge-small-en-v1.5`).
 pub const SMART_MODEL_ID: u32 = 3;
 
-/// The active registry.
-///
-/// This used to be a `OnceLock`, which meant the choice was made once per
-/// process and never revisited. Downloading the model files therefore changed
-/// nothing until the next launch: the files were on disk, Health reported them
-/// present, and search kept ranking on the hashing fallback because the
-/// registry had already decided. That is the worst kind of failure, since it
-/// looks configured. `reload` makes the switch immediate.
+/// Active registry; swappable via `reload` so model downloads apply immediately.
 static GLOBAL: OnceLock<parking_lot::RwLock<Option<Arc<ModelRegistry>>>> = OnceLock::new();
 
 fn global_slot() -> &'static parking_lot::RwLock<Option<Arc<ModelRegistry>>> {
@@ -52,8 +45,7 @@ pub struct ModelRegistry {
     pub dim: usize,
     pub normalize: bool,
     pub fallback_reason: Option<String>,
-    /// Real embedding table when the model files were loaded; `None` means the
-    /// hashing estimator is in use.
+    /// `None` means the hashing estimator is in use.
     #[serde(skip)]
     table: Option<Arc<StaticTable>>,
     #[serde(skip)]
@@ -67,8 +59,7 @@ impl Default for ModelRegistry {
 }
 
 impl ModelRegistry {
-    /// Deterministic hashing estimator. Used when the downloaded model files
-    /// are absent or unusable, and kept as the `Default` implementation.
+    /// Deterministic hashing estimator (fallback and `Default`).
     pub fn new_static() -> Self {
         Self {
             provider: EmbeddingProviderKind::Static,
@@ -82,7 +73,6 @@ impl ModelRegistry {
         }
     }
 
-    /// Disabled / lexical-only provider.
     pub fn new_none() -> Self {
         Self {
             provider: EmbeddingProviderKind::None,
@@ -96,8 +86,7 @@ impl ModelRegistry {
         }
     }
 
-    /// Registry backed by an in-memory table, so tests can exercise the
-    /// table-specific behavior without the downloaded model artifacts.
+    /// In-memory table for tests.
     #[cfg(test)]
     pub(crate) fn with_table_for_test(table: crate::embed::table::StaticTable) -> Self {
         let mut registry = Self::new_static();
@@ -108,15 +97,11 @@ impl ModelRegistry {
         registry
     }
 
-    /// Loads the real static table from `dir` (the downloaded model directory).
-    ///
-    /// Returns `None` when the artifacts are missing/corrupt or the embedding
-    /// width is not [`EMBEDDING_DIM`].
+    /// `None` when artifacts are missing/corrupt or the width isn't [`EMBEDDING_DIM`].
     pub fn load(dir: &Path) -> Option<Self> {
         Self::load_with_f32(dir, false)
     }
 
-    /// Same as [`Self::load_with_f32`], but returns why it failed.
     pub fn load_with_f32_reason_from_dir(dir: &Path, use_f32: bool) -> Result<Self, String> {
         let table = StaticTable::load_with_f32_reason(dir, use_f32)?;
         Ok(Self {
@@ -131,7 +116,6 @@ impl ModelRegistry {
         })
     }
 
-    /// Loads the static table, optionally keeping the f32 matrix.
     pub fn load_with_f32(dir: &Path, use_f32: bool) -> Option<Self> {
         let table = StaticTable::load_with_f32(dir, use_f32)?;
         Some(Self {
@@ -146,7 +130,6 @@ impl ModelRegistry {
         })
     }
 
-    /// Chooses the provider according to `config` and artifact presence in `dir`.
     pub fn from_config_and_dir(config: &KensakuConfig, dir: &Path) -> Self {
         if !config.semantic_enabled {
             return Self::new_none();
@@ -156,8 +139,7 @@ impl ModelRegistry {
         match model_str.as_str() {
             "none" | "off" | "disabled" => Self::new_none(),
             "static" | "potion" => {
-                // Name the failing step: "not found" was reported for every
-                // failure, including files that are present and unparseable.
+                // Report the failing step, not a blanket "not found".
                 match Self::load_with_f32_reason_from_dir(dir, config.semantic_f32_table) {
                     Ok(registry) => registry,
                     Err(reason) => {
@@ -227,11 +209,7 @@ impl ModelRegistry {
         }
     }
 
-    /// Process-wide registry. Hot paths must use this instead of
-    /// `ModelRegistry::default()`.
-    ///
-    /// Returns an `Arc` so a caller can keep a consistent registry across a
-    /// reload without holding a lock.
+    /// Process-wide registry; hot paths must use this, not `ModelRegistry::default()`.
     pub fn global() -> Arc<ModelRegistry> {
         let slot = global_slot();
         if let Some(existing) = slot.read().as_ref() {
@@ -246,12 +224,7 @@ impl ModelRegistry {
         built
     }
 
-    /// Rebuilds the registry from disk and makes it active.
-    ///
-    /// Called after the model files are downloaded or deleted, so the change
-    /// takes effect without a restart. Returns the previous `model_id` and the
-    /// new one when they differ, which means stored vectors belong to a
-    /// different model and have to be rebuilt.
+    /// Rebuilds the registry from disk; returns (old, new) model ids when stored vectors need rebuilding.
     pub fn reload() -> Option<(u32, u32)> {
         let previous_model_id = {
             let slot = global_slot();
@@ -272,12 +245,10 @@ impl ModelRegistry {
         }
     }
 
-    /// True when semantic indexing and querying are active.
     pub fn is_enabled(&self) -> bool {
         self.provider != EmbeddingProviderKind::None
     }
 
-    /// Provider identifier for status and Doctor reporting.
     pub fn provider_name(&self) -> &'static str {
         match self.provider {
             EmbeddingProviderKind::Static => "static",
@@ -286,26 +257,18 @@ impl ModelRegistry {
         }
     }
 
-    /// True when real model weights back this registry.
     pub fn has_static_table(&self) -> bool {
         self.table.is_some()
     }
 
-    /// Mean characters per WordPiece piece for `text`, or `None` when the
-    /// active provider has no word-piece vocabulary to ask (the hashing
-    /// estimator and the ONNX `smart` model).
-    ///
-    /// Used to keep the semantic tier away from queries the static table can
-    /// only spell out one character at a time; see
-    /// [`crate::embed::table::StaticTable::token_granularity`].
+    /// Mean chars per WordPiece piece, or `None` without a word-piece vocabulary.
     pub fn token_granularity(&self, text: &str) -> Option<f32> {
         self.table
             .as_ref()
             .map(|table| table.token_granularity(text))
     }
 
-    /// Tokenizes input text into normalized terms and character 3-grams for subword coverage.
-    /// Only used by the hashing estimator; the static table has its own tokenizer.
+    /// Terms plus character 3-grams; hashing estimator only.
     pub fn tokenize(&self, text: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let cleaned = text.to_lowercase();
@@ -317,7 +280,6 @@ impl ModelRegistry {
             }
             tokens.push(trimmed.to_string());
 
-            // Add character trigrams for words longer than 4 chars
             let chars: Vec<char> = trimmed.chars().collect();
             if chars.len() >= 4 {
                 for window in chars.windows(3) {
@@ -328,7 +290,7 @@ impl ModelRegistry {
         tokens
     }
 
-    /// Embeds text into a unit-normalized float vector. Returns empty if disabled.
+    /// Unit-normalized vector; empty if disabled.
     pub fn embed(&self, text: &str) -> Vec<f32> {
         if !self.is_enabled() {
             return Vec::new();
@@ -374,7 +336,6 @@ impl ModelRegistry {
         vec
     }
 
-    /// Embeds text directly to signed 8-bit quantized vector (-127..=127).
     pub fn embed_to_i8(&self, text: &str) -> Vec<i8> {
         if !self.is_enabled() {
             return Vec::new();
@@ -386,7 +347,7 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Computes cosine similarity between two unit-normalized i8 vectors in [-1.0, 1.0].
+    /// Cosine of unit-normalized i8 vectors, in [-1.0, 1.0].
     pub fn cosine_similarity_i8(a: &[i8], b: &[i8]) -> f32 {
         if a.len() != b.len() || a.is_empty() {
             return 0.0;
@@ -397,12 +358,11 @@ impl ModelRegistry {
             dot += (a[i] as i32) * (b[i] as i32);
         }
 
-        // 127.0 * 127.0 = 16129.0
         (dot as f32) / 16129.0
     }
 }
 
-/// Computes two independent 64-bit FNV-1a hashes with distinct seeds.
+/// Two independent FNV-1a hashes with distinct seeds.
 fn hash_token(s: &str) -> (u64, u64) {
     let mut h1: u64 = 0xcbf29ce484222325;
     let mut h2: u64 = 0x84222325cbf29ce4;
@@ -449,7 +409,6 @@ mod tests {
         let empty_dir = std::env::temp_dir().join("kensaku-empty-model-test");
         let _ = std::fs::create_dir_all(&empty_dir);
 
-        // 1. static with missing artifacts -> falls back to hashing with recorded reason
         let mut cfg = KensakuConfig {
             semantic_enabled: true,
             semantic_model: "static".to_string(),
@@ -461,7 +420,6 @@ mod tests {
         assert!(reg.fallback_reason.is_some());
         assert!(reg.is_enabled());
 
-        // 2. semantic_enabled = false -> provider is None
         cfg.semantic_enabled = false;
         let reg = ModelRegistry::from_config_and_dir(&cfg, &empty_dir);
         assert_eq!(reg.provider, EmbeddingProviderKind::None);
@@ -471,14 +429,12 @@ mod tests {
         assert!(reg.embed("hello").is_empty());
         assert!(reg.embed_to_i8("hello").is_empty());
 
-        // 3. semantic_model = "none" -> provider is None even if semantic_enabled is true
         cfg.semantic_enabled = true;
         cfg.semantic_model = "none".to_string();
         let reg = ModelRegistry::from_config_and_dir(&cfg, &empty_dir);
         assert_eq!(reg.provider, EmbeddingProviderKind::None);
         assert!(!reg.is_enabled());
 
-        // 4. semantic_model = "unknown-model-xyz" -> falls back to static with reason
         cfg.semantic_model = "unknown-model-xyz".to_string();
         let reg = ModelRegistry::from_config_and_dir(&cfg, &empty_dir);
         assert_eq!(reg.provider, EmbeddingProviderKind::Static);
@@ -489,7 +445,6 @@ mod tests {
                 .contains("unknown-model-xyz")
         );
 
-        // 5. semantic_model = "smart" -> falls back to static in K16/K17 when files missing
         cfg.semantic_model = "smart".to_string();
         let reg = ModelRegistry::from_config_and_dir(&cfg, &empty_dir);
         assert_eq!(reg.provider, EmbeddingProviderKind::Static);

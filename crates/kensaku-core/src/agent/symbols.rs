@@ -1,22 +1,12 @@
-//! `find_symbol`: code-symbol lookup backed by tree-sitter.
-//!
-//! The tool takes a symbol name, pre-filters candidate files through the
-//! normal content index (the model never does retrieval itself, and neither
-//! does this tool: the index decides which files are worth parsing), then
-//! parses each candidate with the right grammar and returns matching
-//! **definitions** with path, kind, line range and a one-line signature.
-//!
-//! Supported languages: Rust, Python, JavaScript/JSX, TypeScript/TSX. The
-//! parser set is deliberately small; unknown extensions are skipped, and a
-//! parse failure skips the file rather than failing the call.
+//! `find_symbol`: tree-sitter definition lookup over files prefiltered by the content index.
+//! Rust, Python, JS/JSX, TS/TSX; unknown extensions and parse failures are skipped.
 
 use crate::agent::AgentSession;
 use serde_json::{Value, json};
 
-/// Files parsed per call, hard cap. Candidates come from the content index,
-/// so a broad name still stays bounded.
+/// Hard cap on files parsed per call.
 const MAX_CANDIDATE_FILES: usize = 200;
-/// Files larger than this are skipped (they are generated or vendored).
+/// Larger files are skipped (usually generated or vendored).
 const MAX_PARSE_BYTES: u64 = 512 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 10;
 const MAX_PAGE_SIZE: usize = 50;
@@ -31,7 +21,6 @@ pub struct SymbolHit {
     pub signature: String,
 }
 
-/// Languages understood by the extractor, keyed by extension.
 fn language_for_extension(ext: &str) -> Option<Language> {
     match ext {
         "rs" => Some(Language::Rust),
@@ -80,8 +69,7 @@ impl Language {
     }
 }
 
-/// Extracts definitions from one source file. Returns an empty vec on parse
-/// failure; the caller decides whether that is worth reporting.
+/// Extracts definitions from one file; empty on parse failure.
 pub fn extract_symbols(path: &std::path::Path) -> Vec<SymbolHit> {
     let extension = path
         .extension()
@@ -135,8 +123,7 @@ fn parse_source(source: &str, language: Language) -> Vec<SymbolHit> {
     hits
 }
 
-/// Depth-first walk collecting definition nodes. Nested definitions
-/// (methods inside impls, functions inside classes) are included.
+/// Depth-first walk collecting definitions, including nested ones.
 fn walk_definitions(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -169,7 +156,6 @@ fn walk_definitions(
     }
 }
 
-/// Maps a definition node to `(name, kind)` for the language.
 fn definition_of(
     node: &tree_sitter::Node<'_>,
     source: &str,
@@ -210,7 +196,6 @@ fn definition_of(
     Some((name, kind))
 }
 
-/// Runs the `find_symbol` tool against a session and returns the MCP payload.
 pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Value, (String, bool)> {
     let Some(query) = args
         .get("query")
@@ -250,8 +235,7 @@ pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Valu
         .map(|size| size.clamp(1, MAX_PAGE_SIZE as u64) as usize)
         .unwrap_or(DEFAULT_PAGE_SIZE);
 
-    // Scope enforcement matches the other read tools, and the policy fails
-    // closed instead of silently becoming "no roots" on a config error.
+    // Policy fails closed rather than becoming "no roots" on a config error.
     let policy = session.policy().map_err(|error| (error, false))?;
     if let Some(path) = path {
         if !policy.read_allowed(path) {
@@ -271,14 +255,10 @@ pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Valu
         }
     }
 
-    // Candidate files: an explicit path, else content-index prefilter.
     let candidate_paths: Vec<String> = if let Some(path) = path {
         vec![path.to_string()]
     } else {
-        // Without a path this used to run `content:"query"` over the whole
-        // index, ignoring the configured agent scope. Compose the same scoped
-        // query as every other read tool, and escape the symbol name so it
-        // cannot inject query syntax.
+        // Use the scoped query like other read tools; escape the name to prevent query injection.
         let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
         let scope_paths = policy.query_scopes(None).map_err(|error| (error, true))?;
         let search_query = super::compose_query_scoped(
@@ -299,7 +279,6 @@ pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Valu
         }
     };
 
-    // Parse and collect.
     let mut hits: Vec<SymbolHit> = Vec::new();
     let mut files_parsed = 0usize;
     let needle = query.to_lowercase();
@@ -308,7 +287,7 @@ pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Valu
             continue;
         }
         let candidate_path = std::path::Path::new(candidate);
-        // Cheap pre-check: the file must mention the symbol at all.
+        // Cheap pre-check: the file must mention the symbol.
         let extension = candidate_path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -337,7 +316,7 @@ pub fn tool_find_symbol(session: &AgentSession<'_>, args: &Value) -> Result<Valu
         }
     }
 
-    // Exact matches first, then prefix, then substring; ties by path then line.
+    // Exact, then prefix, then substring; ties by path then line.
     hits.sort_by(|a, b| {
         let rank = |hit: &SymbolHit| -> u8 {
             if hit.name == query {

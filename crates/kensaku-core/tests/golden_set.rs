@@ -1,18 +1,5 @@
-//! Golden Query Set for Kensaku search evaluation.
-//!
-//! Evaluates retrieval quality across 50 labeled queries covering:
-//! - Natural language intent & filters (sort, scope, type, size, modified)
-//! - Lexical fuzzy filename and path matching
-//! - Content BM25 keyword matching
-//! - CJK tokenization (Han, Hiragana, Katakana, Hangul, mixed-script, unigram/bigram)
-//! - Accented multilingual European filenames and content
-//! - Multimodal visual vector retrieval
-//!
-//! Metrics computed:
-//! - Recall@1, Recall@5
-//! - MRR (Mean Reciprocal Rank)
-//! - NDCG@10 (Normalized Discounted Cumulative Gain)
-//! - Latency (p50, p95)
+//! Golden query set: 50 labeled queries (intent, lexical, BM25, CJK, accented, visual).
+//! Reports Recall@1/5, MRR, NDCG@10 and latency p50/p95.
 
 use kensaku_core::config::KensakuConfig;
 use kensaku_core::embed::{DEFAULT_MODEL_ID, EMBEDDING_DIM, Unit, UnitStore};
@@ -44,7 +31,6 @@ struct GoldenQuery {
 }
 
 const GOLDEN_DOCS: &[GoldenDoc] = &[
-    // Resumes & Careers
     GoldenDoc {
         rel_path: "documents/resume_jane_doe.txt",
         content: "Jane Doe Senior Rust Engineer Curriculum Vitae experience in systems programming and search engines. Contact: jane@example.com",
@@ -66,7 +52,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // Invoices & Finance
     GoldenDoc {
         rel_path: "docs/invoice_2024.pdf",
         content: "Invoice #1042 payment total due $450.00 for cloud hosting services",
@@ -81,7 +66,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // Projects & Engineering
     GoldenDoc {
         rel_path: "Projects/server/docker_error.log",
         content: "docker daemon container start error: connection timed out retry attempts exhausted 127.0.0.1:2375 connection refused",
@@ -173,7 +157,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // Content Knowledge Base
     GoldenDoc {
         rel_path: "docs/distributed_systems.txt",
         content: "Distributed consensus algorithms including Raft and Paxos provide fault tolerance across replicas",
@@ -223,7 +206,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // CJK Documents
     GoldenDoc {
         rel_path: "Projects/docs/最終報告書.txt",
         content: "2025年度第4四半期の全社プロジェクト最終結果に関する報告書",
@@ -280,7 +262,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // Accented / Multilingual European Documents
     GoldenDoc {
         rel_path: "docs/résumé_projet.txt",
         content: "Résumé détaillé du projet d'ingénierie logicielle et spécifications techniques",
@@ -302,7 +283,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
         size_override: None,
         visual_desc: None,
     },
-    // Visual Fixtures
     GoldenDoc {
         rel_path: "Pictures/red_cap.png",
         content: "PNG binary header",
@@ -341,7 +321,6 @@ const GOLDEN_DOCS: &[GoldenDoc] = &[
 ];
 
 const GOLDEN_QUERIES: &[GoldenQuery] = &[
-    // --- Intent & Scoped Queries (1-10) ---
     GoldenQuery {
         query: "latest resume",
         expected_path_contains: "resume_jane_doe.txt",
@@ -392,7 +371,6 @@ const GOLDEN_QUERIES: &[GoldenQuery] = &[
         expected_path_contains: "server.go",
         category: "intent",
     },
-    // --- Lexical Filename & Path Queries (11-18) ---
     GoldenQuery {
         query: "main.rs",
         expected_path_contains: "src/main.rs",
@@ -433,7 +411,6 @@ const GOLDEN_QUERIES: &[GoldenQuery] = &[
         expected_path_contains: "annual_2025.txt",
         category: "lexical",
     },
-    // --- Content BM25 Queries (19-26) ---
     GoldenQuery {
         query: "distributed consensus raft",
         expected_path_contains: "distributed_systems.txt",
@@ -474,7 +451,6 @@ const GOLDEN_QUERIES: &[GoldenQuery] = &[
         expected_path_contains: "settings.json",
         category: "content",
     },
-    // --- CJK Queries (27-36) ---
     GoldenQuery {
         query: "最終報告書",
         expected_path_contains: "最終報告書.txt",
@@ -525,7 +501,6 @@ const GOLDEN_QUERIES: &[GoldenQuery] = &[
         expected_path_contains: "architecture.txt",
         category: "cjk",
     },
-    // --- Accented / Multilingual European Queries (37-40) ---
     GoldenQuery {
         query: "résumé",
         expected_path_contains: "résumé_projet.txt",
@@ -546,7 +521,6 @@ const GOLDEN_QUERIES: &[GoldenQuery] = &[
         expected_path_contains: "informe_diseño.txt",
         category: "multilingual",
     },
-    // --- Visual & Multimodal Queries (41-50) ---
     GoldenQuery {
         query: "red cap",
         expected_path_contains: "red_cap.png",
@@ -657,7 +631,6 @@ fn setup_golden_corpus() -> GoldenCorpus {
         };
         db.upsert(&entry).expect("upsert metadata entry");
 
-        // Content indexing (Tantivy + kensaku tokenizer + folded tier)
         content_index
             .add_or_update(
                 &abs_path,
@@ -669,11 +642,9 @@ fn setup_golden_corpus() -> GoldenCorpus {
             )
             .expect("index content");
 
-        // Visual metadata is kept in the fixture for future real-model runs,
-        // but production has no encoder yet. Do not seed a mock visual index.
+        // No production visual encoder yet; don't seed a mock visual index.
         let _ = doc.visual_desc;
 
-        // Static semantic indexing fallback vector
         let sem_vec = kensaku_core::embed::model::ModelRegistry::global().embed_to_i8(doc.content);
         unit_store.add_unit(
             Unit {
@@ -715,7 +686,6 @@ fn golden_query_set_evaluation() {
 
     let mut summary = EvaluationSummary::default();
 
-    // Warm up the index once
     let _ = SearchDispatcher::search_response_fast_sorted_with_snippets(
         "test warm up",
         &corpus.metadata,
@@ -743,9 +713,7 @@ fn golden_query_set_evaluation() {
     let mut missed = Vec::new();
 
     for (i, gq) in GOLDEN_QUERIES.iter().enumerate() {
-        // The production visual encoder is intentionally disabled until a real
-        // CLIP/SigLIP pack is wired. Visual cases stay in the fixture but do not
-        // count toward the lexical/semantic gate yet.
+        // Visual cases are excluded from the gate until a real CLIP/SigLIP encoder is wired.
         if gq.category == "visual" {
             continue;
         }
@@ -854,7 +822,6 @@ fn golden_query_set_evaluation() {
         }
     }
 
-    // Acceptance Gate: recall@5 >= 0.90, MRR >= 0.80
     assert!(
         recall_at_5 >= 0.90,
         "Golden set recall@5 ({:.4}) must be >= 0.90",

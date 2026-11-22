@@ -1,11 +1,5 @@
-//! Optional Indra OCR engine (datalab-to/indra-ocr), ported natively to Rust.
-//!
-//! The model pack (about 27 MB of ONNX files plus meta.json) is downloaded
-//! on demand when the user selects the `indra` engine; its weights are under
-//! a modified OpenRAIL-M license, so they are never bundled with Kensaku.
-//! It runs on the same `ort` runtime as PP-OCR and is compiled with the
-//! `accurate-ocr` feature. When it cannot run, callers fall back to PP-OCR,
-//! then Tesseract.
+//! Optional native Indra OCR engine (`accurate-ocr` feature). The pack is
+//! downloaded on demand (OpenRAIL-M, never bundled); callers fall back to PP-OCR.
 
 #[cfg(feature = "accurate-ocr")]
 mod engine;
@@ -18,8 +12,7 @@ use crate::config::KensakuConfig;
 use crate::ocr::OcrOutcome;
 use std::path::{Path, PathBuf};
 
-/// Files of the pack that the port reads. The n-gram language models, the
-/// math and the reading-order models of the Python package are not needed.
+/// Pack files the port reads.
 pub const PACK_FILES: [&str; 8] = [
     "det.onnx",
     "rec.onnx",
@@ -31,8 +24,7 @@ pub const PACK_FILES: [&str; 8] = [
     "meta.json",
 ];
 
-/// Directory holding the Indra pack. `KENSAKU_INDRA_PACK_DIR` overrides it
-/// (development and the real-model tests).
+/// Pack directory; `KENSAKU_INDRA_PACK_DIR` overrides it.
 pub fn pack_dir() -> PathBuf {
     match std::env::var_os("KENSAKU_INDRA_PACK_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -41,18 +33,14 @@ pub fn pack_dir() -> PathBuf {
 }
 
 pub fn pack_present() -> bool {
-    // Size-checked, not merely present: a stale pack from an older version or
-    // a truncated download loads and then reads nothing, which is how #174 was
-    // reported. Reporting it as missing lets Download verify and replace it.
+    // Size-checked: stale or truncated packs load but read nothing (#174).
     crate::models::indra_pack_present()
 }
 
-/// Cached self-test result. Reset after a pack download so a failure against
-/// the old files does not outlive the download that fixed them (#174).
+/// Cached self-test result; reset after a pack download (#174).
 #[cfg(feature = "accurate-ocr")]
 static SELF_TEST: parking_lot::Mutex<Option<Result<(), String>>> = parking_lot::Mutex::new(None);
 
-/// Drops the cached Indra self-test so the next status check runs it again.
 pub fn reset_self_test() {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -60,7 +48,7 @@ pub fn reset_self_test() {
     }
 }
 
-/// Why Indra cannot run, in words a user can act on, or `None` when it can.
+/// Why Indra cannot run, or `None` when it can.
 pub fn problem() -> Option<String> {
     if !crate::ocr::accurate_compiled() {
         return Some("Indra OCR is not part of this build".into());
@@ -75,7 +63,7 @@ pub fn problem() -> Option<String> {
     self_test().err()
 }
 
-/// True when Indra can actually read: build, pack, runtime and self-test.
+/// Build, pack, runtime and self-test all OK.
 pub fn available() -> bool {
     crate::ocr::accurate_compiled()
         && pack_present()
@@ -83,19 +71,17 @@ pub fn available() -> bool {
         && self_test().is_ok()
 }
 
-/// Reads an image file with Indra. `Unavailable` when it cannot run.
 pub fn extract_image(path: &Path) -> OcrOutcome {
     if !(pack_present() && crate::ocr::runtime_loadable()) {
         return OcrOutcome::Unavailable;
     }
-    // Budgeted decode: see `indexer::extract::image::decode_for_recognition`.
     match crate::indexer::extract::image::decode_for_recognition(path) {
         Some((image, _reserved)) => extract_decoded(&image),
         None => OcrOutcome::NoText,
     }
 }
 
-/// Reads an already-decoded image (scanned PDF pages) with Indra.
+/// Reads an already-decoded image (scanned PDF pages).
 pub fn extract_decoded(image: &image::DynamicImage) -> OcrOutcome {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -120,10 +106,7 @@ pub fn extract_decoded(image: &image::DynamicImage) -> OcrOutcome {
     }
 }
 
-/// Runs Indra once on a known image and checks the words come back. Cached
-/// once it has run against a present pack: "ready" in the UI means a correct
-/// read, not files on disk. [`reset_self_test`] clears the cache after a
-/// download, so a retry does not need a restart.
+/// Reads a known image and checks the words; cached once run against a present pack.
 pub fn self_test() -> Result<(), String> {
     #[cfg(feature = "accurate-ocr")]
     {
@@ -182,8 +165,7 @@ pub fn self_test() -> Result<(), String> {
     }
 }
 
-/// A few engines, loaded on first use, so several extraction workers can OCR
-/// at once instead of queueing behind one lock (and timing out).
+/// A few lazily loaded engines so workers don't queue behind one lock.
 #[cfg(feature = "accurate-ocr")]
 mod pool {
     use super::engine::Engine;
@@ -194,8 +176,7 @@ mod pool {
     /// Threads per engine; engines = half the cores / this, at most 3.
     const THREADS: usize = 2;
 
-    /// `None` once loading failed: a corrupt pack is probed once, not once
-    /// per image.
+    /// `None` once loading failed, so a corrupt pack is probed only once.
     static ENGINES: OnceLock<Option<Vec<Mutex<Engine>>>> = OnceLock::new();
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -204,7 +185,7 @@ mod pool {
         let count = (cores / 2 / THREADS).clamp(1, 4);
         // `ort` can panic instead of erroring when the runtime is broken.
         let loaded = std::panic::catch_unwind(|| {
-            // One ONNX Runtime environment per process: share PP-OCR's.
+            // `ort` allows one environment per process: share PP-OCR's.
             let env = paddleocr_rs_onnx::shared_environment().map_err(|e| e.to_string())?;
             let dir = super::pack_dir();
             (0..count)
@@ -224,7 +205,6 @@ mod pool {
         }
     }
 
-    /// `None` when no engine could load.
     pub fn read(page: &Gray) -> Option<Result<super::engine::ReadResult, String>> {
         let engines = ENGINES.get_or_init(load).as_ref()?;
         let start = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -259,9 +239,7 @@ mod tests {
         assert!(PACK_FILES.contains(&"meta.json"));
     }
 
-    /// PP-OCR and Indra in one process, PP-OCR first, as in the app. `ort`
-    /// allows one environment per process; Indra used to build its own and
-    /// fail to load ("only one environment is allowed per process").
+    /// PP-OCR and Indra share one `ort` environment in one process.
     #[cfg(feature = "accurate-ocr")]
     #[test]
     #[ignore = "requires KENSAKU_OCR_PACK_DIR, KENSAKU_INDRA_PACK_DIR and ORT_DYLIB_PATH"]
@@ -270,8 +248,7 @@ mod tests {
         assert_eq!(self_test(), Ok(()), "Indra self-test after PP-OCR");
     }
 
-    /// Kensaku's 104-image UI-text fixture through the real port. Run by
-    /// hand or CI with `KENSAKU_INDRA_PACK_DIR` and `ORT_DYLIB_PATH` set.
+    /// Fixture run through the real port; needs `KENSAKU_INDRA_PACK_DIR` and `ORT_DYLIB_PATH`.
     #[cfg(feature = "accurate-ocr")]
     #[test]
     #[ignore = "requires KENSAKU_INDRA_PACK_DIR and ORT_DYLIB_PATH"]
@@ -296,7 +273,6 @@ mod tests {
         let mut missed = Vec::new();
         for (index, label) in labels.iter().enumerate() {
             let path = fixture.join(format!("{:03}.png", index + 1));
-            // Through the app's dispatch, as indexing calls it.
             let text = match crate::indexer::extract::image::ocr_image(&path) {
                 OcrOutcome::Text(text) => text,
                 other => format!("{other:?}"),

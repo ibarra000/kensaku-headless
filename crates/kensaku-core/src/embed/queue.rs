@@ -54,8 +54,7 @@ impl EmbeddingQueue {
         }
     }
 
-    /// Starts the background embedding worker.
-    /// Uses a bounded 2-thread Rayon pool and respects `query_in_flight` preemption.
+    /// Starts the worker (2-thread pool, preempted by `query_in_flight`).
     pub fn start(&mut self, db: Arc<MetadataDb>) {
         if self.is_running.swap(true, Ordering::SeqCst) {
             return;
@@ -71,7 +70,6 @@ impl EmbeddingQueue {
         let handle = thread::Builder::new()
             .name("kensaku-embed-worker".to_string())
             .spawn(move || {
-                // Rayon thread pool bounded to max 2 threads per ARCHITECTURE §5.3 / §10
                 let embed_pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(2)
                     .thread_name(|i| format!("kensaku-embed-{}", i))
@@ -82,7 +80,6 @@ impl EmbeddingQueue {
                 let mut was_embedding = false;
 
                 while is_running.load(Ordering::SeqCst) {
-                    // Preempt if query in flight
                     if query_in_flight.load(Ordering::SeqCst) {
                         thread::sleep(Duration::from_millis(50));
                         continue;
@@ -90,7 +87,7 @@ impl EmbeddingQueue {
 
                     // TODO: Check battery state (e.g. AC power) and skip if on battery power
 
-                    // Fetch unindexed nodes (indexed_gen = 0), priority: recent first, small files first
+                    // Unindexed nodes, recent and small first.
                     let pending_nodes = match db.get_nodes_for_embedding(16) {
                         Ok(nodes) => nodes,
                         Err(e) => {
@@ -120,8 +117,7 @@ impl EmbeddingQueue {
                             }
                             Self::emit_status(&status_sink, &status);
                         }
-                        // Idle poll interval. Kept short so a crawl that stops
-                        // this worker does not sit in `join` for a full second.
+                        // Short poll so a stopping crawl doesn't wait in `join`.
                         thread::sleep(Duration::from_millis(200));
                         continue;
                     }
@@ -136,8 +132,7 @@ impl EmbeddingQueue {
                         Self::emit_status(&status_sink, &status);
                     }
 
-                    // Collect all units across the batch first (read + embed in parallel),
-                    // then do a single DB transaction + single UnitStore write.
+                    // Embed the batch in parallel, then one DB transaction + one UnitStore write.
                     let mut batch_units: Vec<(u64, Unit, Vec<i8>, String)> = Vec::new();
                     let mut batch_node_ids: Vec<u64> = Vec::new();
 
@@ -161,20 +156,13 @@ impl EmbeddingQueue {
                             continue;
                         }
 
-                        // The crawl never reads cloud-only files, so they reach
-                        // this queue unembedded. Reading one here downloads it
-                        // (or, for a phone over Phone Link, pops "offline"),
-                        // so mark it done without touching its contents.
+                        // Reading a cloud-only file would download it; mark done untouched.
                         if crate::indexer::walker::is_cloud_placeholder_path(&path) {
                             let _ = db.update_node_indexed_gen(node_id, 1, None);
                             continue;
                         }
 
-                        // Names-only paths must never be read for content, not
-                        // even here: the crawl and watcher already skip them,
-                        // but every new row reaches this worker with
-                        // indexed_gen = 0. Mark it done and drop any units left
-                        // by a previous mode.
+                        // Names-only paths are never read; mark done and drop stale units.
                         if crate::indexer::extract::is_name_only_path(&path) {
                             let _ = db.update_node_indexed_gen(node_id, 1, None);
                             let _ = db.delete_units_for_nodes(&[node_id]);
@@ -243,15 +231,10 @@ impl EmbeddingQueue {
                             ));
                         }
 
-                        // Mark node as processed (hash stored for dedup)
                         let _ = db.update_node_indexed_gen(node_id, 1, Some(&content_hash));
                     }
 
-                    // Batch delete + insert in one SQLite transaction (one commit
-                    // instead of one per unit). The in-memory store is updated
-                    // afterwards so searches are not blocked behind disk writes.
-                    // A failed BEGIN means another writer holds a transaction on
-                    // this connection; its commit covers these rows.
+                    // One transaction for the batch; a failed BEGIN means another writer's commit covers these rows.
                     let began = db.begin_transaction().is_ok();
                     let _ = db.delete_units_for_nodes(&batch_node_ids);
                     let mut inserted: Vec<(Unit, Vec<i8>)> = Vec::with_capacity(batch_units.len());
@@ -280,7 +263,6 @@ impl EmbeddingQueue {
                     }
                     drop(unit_store_write);
 
-                    // Update indexing status progress
                     if let Some(st_arc) = &status {
                         let mut st = st_arc.write();
                         st.units_indexed = unit_store.read().len();
@@ -315,14 +297,11 @@ fn fnv_hash(data: &str) -> u64 {
 mod tests {
     use super::fnv_hash;
 
-    /// FNV-1a offset basis is the hash of the empty string.
     #[test]
     fn fnv_hash_empty_string_is_offset_basis() {
         assert_eq!(fnv_hash(""), 0xcbf29ce484222325u64);
     }
 
-    /// The hash is deterministic: two calls with the same input produce the
-    /// same output.
     #[test]
     fn fnv_hash_is_deterministic() {
         let h1 = fnv_hash("hello kensaku");
@@ -330,8 +309,6 @@ mod tests {
         assert_eq!(h1, h2);
     }
 
-    /// Different strings must (in the overwhelming majority of cases) produce
-    /// different hashes.
     #[test]
     fn fnv_hash_differs_for_different_inputs() {
         assert_ne!(fnv_hash("foo"), fnv_hash("bar"));
@@ -339,24 +316,18 @@ mod tests {
         assert_ne!(fnv_hash("a"), fnv_hash("b"));
     }
 
-    /// Single-byte inputs can be verified manually against the FNV-1a spec.
     /// FNV-1a("a") = (offset ^ 0x61) * prime
     #[test]
     fn fnv_hash_single_byte_matches_spec() {
         const OFFSET: u64 = 0xcbf29ce484222325;
         const PRIME: u64 = 0x100000001b3;
-        // Correct FNV-1a order: h = (h XOR byte) * prime
         let expected = (OFFSET ^ b'a' as u64).wrapping_mul(PRIME);
         assert_eq!(fnv_hash("a"), expected);
     }
 
-    /// Hash of "hello" is stable across builds (regression guard).
+    /// Regression guard for "hello".
     #[test]
     fn fnv_hash_hello_is_stable() {
-        // Computed independently: echo -n hello | python3 -c
-        //   "import sys; h=0xcbf29ce484222325; p=0x100000001b3
-        //    [h:=((h^b)*p)&0xFFFFFFFFFFFFFFFF for b in sys.stdin.buffer.read()]
-        //    print(hex(h))"
         assert_eq!(fnv_hash("hello"), 0xa430d84680aabd0bu64);
     }
 }

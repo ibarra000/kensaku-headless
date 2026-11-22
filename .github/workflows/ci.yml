@@ -1,6 +1,5 @@
 name: CI
 
-# Only run for changes that can actually land: PRs and pushes to master.
 on:
   push:
     branches: [main]
@@ -14,8 +13,7 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # A compile plus tests takes about 10 minutes. Without a bound, a stalled
-    # download or build hangs until the workflow timeout.
+    # Bound stalled downloads/builds (normal run ~10 min).
     timeout-minutes: 40
     strategy:
       fail-fast: false

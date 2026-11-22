@@ -13,8 +13,7 @@ pub const DOCTOR_ACTIONS: [&str; 6] = [
     "reindex",
 ];
 
-/// Runs the repair a doctor check offers. Unknown actions are rejected so a
-/// stale client cannot look like a successful repair.
+/// Runs a doctor repair; unknown actions are rejected so a stale client can't fake success.
 pub fn doctor_fix(indexer: &Arc<IndexerManager>, action: &str) -> Result<String, String> {
     match action {
         "download-models" => {
@@ -41,8 +40,7 @@ pub fn doctor_fix(indexer: &Arc<IndexerManager>, action: &str) -> Result<String,
                 crate::doctor::format_bytes(report.bytes_reclaimed)
             ))
         }
-        // A fresh crawl restarts the watcher at its end and re-reads anything
-        // that changed while it was down.
+        // A fresh crawl restarts the watcher and re-reads changes made while it was down.
         "restart-watcher" => {
             Arc::clone(indexer).rebuild_all()?;
             Ok("Restarting indexing; the watcher comes back when the scan finishes.".to_string())
@@ -58,8 +56,7 @@ pub fn doctor_fix(indexer: &Arc<IndexerManager>, action: &str) -> Result<String,
     }
 }
 
-/// Sets or clears the persistent pause flag. Extraction workers block while
-/// paused; the watcher keeps applying renames and deletes.
+/// Sets the persistent pause flag; extraction blocks, the watcher still applies renames/deletes.
 pub fn set_paused(indexer: &IndexerManager, paused: bool) -> Result<(), String> {
     let mut config = indexer.config.read().clone();
     config.pause_indexing = paused;

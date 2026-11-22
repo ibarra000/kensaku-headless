@@ -1,8 +1,5 @@
-//! Headless access to a local Kensaku index.
-//!
-//! This module powers the read-only CLI fallback and the MCP server. It only
-//! reads the index built by the daemon: there is no in-app AI, no LLM call and no
-//! network access anywhere on this path.
+//! Read-only headless access to a local Kensaku index (CLI fallback + MCP).
+//! No LLM calls and no network access on this path.
 
 pub mod connect;
 pub mod http;
@@ -23,11 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const NO_INDEX_MESSAGE: &str =
     "No Kensaku index found. Run `kensaku setup --root <folder>` to build one.";
 
-/// A process-lifetime snapshot of the Kensaku data directory.
-///
-/// Opening is the expensive part (SQLite load + Tantivy reader + embedding
-/// table); [`Self::search`] and [`Self::state`] are cheap afterwards. Long-lived
-/// transports (MCP) should open once per session.
+/// Process-lifetime snapshot of the data directory; opening is expensive, queries are cheap.
 pub struct HeadlessIndex {
     pub config: KensakuConfig,
     pub metadata: MetadataStore,
@@ -39,7 +32,7 @@ pub struct HeadlessIndex {
 }
 
 impl HeadlessIndex {
-    /// Opens the user's real Kensaku data directory.
+    /// Opens the default data directory.
     pub fn open() -> Result<Self, String> {
         let dir = KensakuConfig::config_dir();
         if !dir.join("config.json").exists() && !dir.join("metadata.db").exists() {
@@ -48,8 +41,7 @@ impl HeadlessIndex {
         Self::open_at(&dir)
     }
 
-    /// Opens an explicit data directory. Used by tests and reusable by callers
-    /// that keep the index somewhere other than the default config dir.
+    /// Opens an explicit data directory.
     pub fn open_at(dir: &Path) -> Result<Self, String> {
         let config_path = dir.join("config.json");
         let db_path = dir.join("metadata.db");
@@ -79,8 +71,7 @@ impl HeadlessIndex {
         crate::indexer::extract::set_external_extractors(config.extractors.clone());
         crate::indexer::extract::set_path_modes(&config.watched_dirs, &config.name_only_dirs);
 
-        // Read-write is fine: WAL lets the daemon writer and this connection
-        // coexist. Nothing on the headless path writes.
+        // WAL lets this connection coexist with the daemon writer; nothing here writes.
         let db = MetadataDb::open_in_dir(dir)?;
         let metadata = MetadataStore::with_db(db);
 
@@ -117,7 +108,6 @@ impl HeadlessIndex {
         })
     }
 
-    /// Runs a query against the loaded index.
     pub fn search(&self, query: &str, limit: usize) -> Result<SearchResponse, String> {
         self.search_page(query, limit, 0)
     }
@@ -148,7 +138,7 @@ impl HeadlessIndex {
         self.search_local_page_with_snippets(query, limit, 0, true)
     }
 
-    /// No-snippet local path used by MCP, which batches its own extraction.
+    /// No-snippet search used by MCP, which batches its own extraction.
     pub fn search_local_page(
         &self,
         query: &str,
@@ -181,14 +171,11 @@ impl HeadlessIndex {
         ))
     }
 
-    /// Computes snippets for `paths` in parallel on the extraction-free fast
-    /// path (plain text is read directly, documents only hit the extraction
-    /// cache). The result is aligned with `paths`.
+    /// Extraction-free snippets for `paths`, aligned with the input.
     pub fn snippets(&self, paths: &[String], query: &str) -> Vec<Option<String>> {
         snippets_for_paths(paths, query)
     }
 
-    /// Looks up visually similar images in the local visual store.
     pub fn find_similar_images_local(
         &self,
         path: &str,
@@ -251,8 +238,7 @@ impl HeadlessIndex {
         Ok(results)
     }
 
-    /// Health snapshot without a daemon: the local stores were opened at
-    /// startup, so this is cheap.
+    /// Health snapshot without a daemon.
     pub fn health_local(&self) -> Value {
         let state = match self.state_local() {
             Ok(state) => state,
@@ -279,8 +265,7 @@ impl HeadlessIndex {
         })
     }
 
-    /// Compact index status shared by `kensaku state` and the MCP
-    /// `index_state` tool.
+    /// Compact index status for `kensaku state` and MCP `index_state`.
     pub fn state(&self) -> Result<Value, String> {
         if let Ok(value) = crate::daemon::request("index_state", json!({})) {
             return Ok(value);
@@ -313,9 +298,7 @@ impl HeadlessIndex {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
 
-        // The units' model id is what the stored vectors were encoded with;
-        // the active id is what a new query is embedded with. They can differ
-        // until the daemon re-embeds after a model change.
+        // Stored vectors may use a different model id than queries until the daemon re-embeds.
         let units_model_id = match self.metadata.db() {
             Some(db) => db.units_model_id()?,
             None => None,
@@ -341,7 +324,6 @@ impl HeadlessIndex {
     }
 }
 
-/// Computes extraction-free snippets for a page of results.
 pub fn snippets_for_paths(paths: &[String], query: &str) -> Vec<Option<String>> {
     use rayon::prelude::*;
     paths
@@ -350,12 +332,7 @@ pub fn snippets_for_paths(paths: &[String], query: &str) -> Vec<Option<String>> 
         .collect()
 }
 
-/// Backend selected for one MCP session.
-///
-/// `Daemon` never opens SQLite, Tantivy or the embedding table in this
-/// process; tool calls are forwarded to the single writer. `Local` is the
-/// read-only fallback used when no daemon is running. `None` still answers
-/// `initialize` and returns actionable errors from tools.
+/// MCP session backend: forward to the daemon, read locally, or none (tools return errors).
 pub enum AgentSession<'a> {
     Daemon,
     Local(&'a HeadlessIndex),
@@ -367,13 +344,7 @@ impl AgentSession<'_> {
         matches!(self, Self::Daemon)
     }
 
-    /// Loads the security policy for this session.
-    ///
-    /// This fails closed: a daemon that cannot answer `get_config`, a
-    /// malformed response, or a session with no index all return an error. The
-    /// old accessors turned those failures into empty vectors, and an empty
-    /// root list means "the whole index is visible", so a config hiccup
-    /// silently widened the agent's scope.
+    /// Loads the security policy. Fails closed: an empty root list would mean "whole index visible".
     pub fn policy(&self) -> Result<AgentPolicy, String> {
         let config = match self {
             Self::Daemon => crate::daemon::request("get_config", json!({}))
@@ -391,12 +362,7 @@ impl AgentSession<'_> {
         })
     }
 
-    /// Whether `path` is present in the index this session serves.
-    ///
-    /// Direct reads are restricted to indexed files: an MCP client must not be
-    /// able to turn `read_snippet` into an arbitrary-file reader by naming a
-    /// path the indexer deliberately skipped (secrets, excluded extensions,
-    /// files outside every watched root).
+    /// Whether `path` is indexed; keeps `read_snippet` from reading arbitrary (skipped) files.
     pub fn contains_path(&self, path: &str) -> Result<bool, String> {
         let requested = Path::new(path);
         let canonical = std::fs::canonicalize(requested).ok();
@@ -440,8 +406,7 @@ impl AgentSession<'_> {
         }
     }
 
-    /// Keyset-paginated exhaustive search: matches strictly after
-    /// `start_after` (a path), for pagination past the 10k exhaustive cap.
+    /// Keyset-paginated exhaustive search strictly after `start_after`, past the 10k cap.
     pub fn search_page_after(
         &self,
         query: &str,
@@ -464,8 +429,7 @@ impl AgentSession<'_> {
                 serde_json::from_value(value).map_err(|e| e.to_string())
             }
             Self::Local(index) => {
-                // Callers pass a composed query that already carries
-                // `mode:exhaustive`; the keyset filter does the rest.
+                // The caller's query already carries `mode:exhaustive`.
                 Ok(SearchDispatcher::search_response_exhaustive_after(
                     query.trim(),
                     &index.metadata,
@@ -519,7 +483,6 @@ impl AgentSession<'_> {
         snippets_for_paths(paths, query)
     }
 
-    /// Looks up visually similar images.
     pub fn find_similar_images(
         &self,
         path: &str,
@@ -541,8 +504,7 @@ impl AgentSession<'_> {
         }
     }
 
-    /// `reindex` is the only write tool. It requires both the config opt-in
-    /// and a running daemon, so read-only fallback can never write.
+    /// The only write tool: requires the config opt-in and a running daemon.
     pub fn reindex(&self) -> Result<Value, String> {
         match self {
             Self::Daemon => crate::daemon::request("reindex", json!({})),
@@ -555,11 +517,7 @@ impl AgentSession<'_> {
     }
 }
 
-/// The security policy an agent session must apply to every read.
-///
-/// Built by [`AgentSession::policy`], which fails closed. Keeping the two
-/// values together makes it hard to apply one (scope) without the other
-/// (excluded extensions).
+/// Security policy (scope + excluded extensions) applied to every agent read.
 #[derive(Debug, Clone, Default)]
 pub struct AgentPolicy {
     pub roots: Vec<String>,
@@ -567,13 +525,7 @@ pub struct AgentPolicy {
 }
 
 impl AgentPolicy {
-    /// Rejects caller-supplied `in:` scopes that could widen the agent scope.
-    ///
-    /// The parser ORs every include scope together, so a caller query such as
-    /// `in:"/etc"` plus the roots appended by [`compose_query_scoped`] searched
-    /// both `/etc` and the roots. When roots are configured, every caller
-    /// include must be inside one of them. Negated scopes are allowed because
-    /// they only narrow the result set.
+    /// Rejects `in:` includes outside the configured roots; the parser ORs includes, so they would widen scope.
     pub fn validate_query_scope(&self, raw_query: &str) -> Result<(), String> {
         if self.roots.is_empty() {
             return Ok(());
@@ -607,25 +559,13 @@ impl AgentPolicy {
         agent_read_allowed(&self.roots, &self.excluded_extensions, path)
     }
 
-    /// Scope paths to compose into a query for an optional requested path.
     pub fn query_scopes(&self, requested: Option<&str>) -> Result<Vec<String>, String> {
         agent_scope_paths(&self.roots, requested)
     }
 }
 
-/// Applies the configured agent-scope roots to an optional requested path.
-///
-/// - No roots configured: pass the request through unchanged.
-/// - Roots configured: a requested path must live under one of them (else
-///   the request is rejected); an absent path defaults to the union of the
-///   roots.
-///
-/// Containment is decided on resolved paths: existing paths are canonicalized
-/// (which resolves `..`, `.` and symlinks) and non-existent paths fall back to
-/// a lexical normalization, so a request cannot escape a root with `..`.
-///
-/// Returns the scope paths to append as `in:"..."` tokens, or an error for
-/// out-of-scope requests.
+/// Applies agent-scope roots to an optional requested path, returning `in:` scope paths.
+/// Containment uses resolved paths so `..`/symlinks cannot escape a root.
 pub fn agent_scope_paths(roots: &[String], requested: Option<&str>) -> Result<Vec<String>, String> {
     if roots.is_empty() {
         return Ok(requested
@@ -638,8 +578,7 @@ pub fn agent_scope_paths(roots: &[String], requested: Option<&str>) -> Result<Ve
     let requested = requested.map(str::trim).filter(|path| !path.is_empty());
     if let Some(path) = requested {
         if roots.iter().any(|root| scope_contains(root, path)) {
-            // Keep the caller's spelling for query matching; containment was
-            // already decided on the resolved path.
+            // Keep the caller's spelling; containment was decided on the resolved path.
             return Ok(vec![normalize_scope_path(path)]);
         }
         return Err(format!(
@@ -653,10 +592,7 @@ pub fn agent_scope_paths(roots: &[String], requested: Option<&str>) -> Result<Ve
         .collect())
 }
 
-/// Expands a leading `~` and lexically normalizes `.`/`..` components.
-///
-/// This is for display/composition only; use [`scope_contains`] for
-/// containment checks so symlinks are resolved where possible.
+/// Expands `~` and lexically normalizes; display only, use [`scope_contains`] for checks.
 fn normalize_scope_path(path: &str) -> String {
     lexical_scope_path(&expand_tilde(path))
         .to_string_lossy()
@@ -669,8 +605,7 @@ fn expand_tilde(path: &str) -> String {
         return path.to_string();
     };
     if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
-        // `~user` is not supported; leave it untouched rather than
-        // concatenating it onto the current home directory.
+        // `~user` is unsupported; leave it untouched.
         return path.to_string();
     }
     let Some(home) =
@@ -705,9 +640,7 @@ fn lexical_scope_path(path: &str) -> PathBuf {
     out
 }
 
-/// Resolves a path for scope comparison. Existing paths are canonicalized so
-/// symlinks and `..` resolve exactly as the OS would; non-existent paths use a
-/// lexical normalization (enough to stop `..` escapes).
+/// Canonicalizes existing paths; falls back to lexical normalization (stops `..` escapes).
 fn resolved_scope_path(path: &str) -> PathBuf {
     let expanded = expand_tilde(path);
     std::fs::canonicalize(&expanded).unwrap_or_else(|_| lexical_scope_path(&expanded))
@@ -719,8 +652,7 @@ fn scope_contains(root: &str, path: &str) -> bool {
     path == root || path.starts_with(&root)
 }
 
-/// True when `path` is within the configured agent-scope roots (or no roots
-/// are configured). Used to gate `read_snippet`-style single-path reads.
+/// Whether `path` is within the agent-scope roots (or none are configured).
 pub fn agent_path_allowed(roots: &[String], path: &str) -> bool {
     if roots.is_empty() {
         return true;
@@ -728,19 +660,12 @@ pub fn agent_path_allowed(roots: &[String], path: &str) -> bool {
     roots.iter().any(|root| scope_contains(root, path))
 }
 
-/// Extensions a direct agent read must never return, whatever the scope says.
-///
-/// Indexing already excludes these by default (private keys, certificates,
-/// password databases); a single-path read must not be a way around that.
+/// Extensions a direct agent read never returns, regardless of scope.
 const ALWAYS_DENIED_EXTENSIONS: &[&str] = &[
     "pem", "key", "pfx", "p12", "crt", "cer", "kdbx", "gpg", "asc", "jks", "keystore",
 ];
 
-/// Filenames that carry credentials regardless of extension.
-///
-/// The list intentionally covers the common credential stores agents have been
-/// tricked into reading. `.env` is matched as a prefix too, so `.env.local`,
-/// `.env.production` and similar variants are covered.
+/// Credential filenames denied regardless of extension; `.env` also matches as a prefix.
 const ALWAYS_DENIED_NAMES: &[&str] = &[
     ".env",
     ".netrc",
@@ -763,8 +688,7 @@ const ALWAYS_DENIED_NAMES: &[&str] = &[
     "auth.json",
 ];
 
-/// Path components that hold credential stores. A direct read must never
-/// traverse these even when the file name looks harmless.
+/// Path components holding credential stores; never readable directly.
 const ALWAYS_DENIED_COMPONENTS: &[&str] = &[
     ".ssh",
     ".aws",
@@ -774,17 +698,8 @@ const ALWAYS_DENIED_COMPONENTS: &[&str] = &[
     ".password-store",
 ];
 
-/// Whether the agent surface may read `path` directly.
-///
-/// Scope answers "where"; this answers "what". An empty scope means the whole
-/// index is searchable, which is the documented default, but it must not also
-/// mean "and any file on disk": without this check `read_snippet` on an
-/// absolute path returned the contents of `~/.ssh/id_ed25519` to any connected
-/// MCP client, because a direct read never consults the indexing denylist.
-///
-/// Callers must additionally require that the path is indexed
-/// ([`AgentSession::contains_path`]); this function only answers whether the
-/// name and scope permit a read.
+/// Whether name and scope permit a direct read. An empty scope must not mean "any file on disk".
+/// Callers must also require the path is indexed ([`AgentSession::contains_path`]).
 pub fn agent_read_allowed(roots: &[String], excluded_extensions: &[String], path: &str) -> bool {
     if !agent_path_allowed(roots, path) {
         return false;
@@ -819,10 +734,7 @@ pub fn agent_read_allowed(roots: &[String], excluded_extensions: &[String], path
             }))
 }
 
-/// Composes a Kensaku query from a base query plus one or more scope paths.
-///
-/// Like [`compose_query`], but every scope path becomes an `in:"..."` token
-/// (multiple include scopes are OR'd by the parser — the agent-scope union).
+/// Like [`compose_query`] with one `in:"..."` token per scope path (OR'd by the parser).
 pub fn compose_query_scoped(
     base: &str,
     scope_paths: &[String],
@@ -844,10 +756,7 @@ pub fn compose_query_scoped(
     composed
 }
 
-/// Composes a Kensaku query from a base query plus optional agent filters.
-///
-/// Paths are quoted so a path containing spaces (or a `:` / `"`) survives the
-/// query lexer; embedded quotes and backslashes are escaped.
+/// Composes a query plus agent filters; paths are quoted and escaped for the lexer.
 pub fn compose_query(
     base: &str,
     path: Option<&str>,
@@ -894,8 +803,7 @@ fn escape_query_value(value: &str) -> String {
     out
 }
 
-/// Truncates `text` to at most `max_chars` characters without splitting a
-/// UTF-8 code point.
+/// Truncates to `max_chars` chars on a code-point boundary.
 pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -903,10 +811,7 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-/// Random-enough token for a loopback-only local socket or HTTP endpoint.
-///
-/// Not cryptographic: the threat model is other local processes, and the
-/// token file is 0600. Same scheme the daemon uses for its socket token.
+/// Non-cryptographic token for loopback endpoints; threat model is local processes, file is 0600.
 pub fn new_connection_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -916,7 +821,6 @@ pub fn new_connection_token() -> String {
     format!("{:x}-{:x}", std::process::id(), nanos)
 }
 
-/// Unix timestamp (seconds) used for `as_of` / freshness fields.
 pub fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -942,8 +846,7 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Sums files in `dir` whose name starts with `prefix` (e.g. `metadata.db`,
-/// `metadata.db-wal`, `metadata.db-shm`).
+/// Sums sizes of files in `dir` whose name starts with `prefix`.
 fn prefixed_file_bytes(dir: &Path, prefix: &str) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -997,9 +900,7 @@ mod scope_tests {
 
     #[test]
     fn direct_reads_refuse_credential_files() {
-        // No scope configured is the documented default, and it means the
-        // whole index is searchable. It must not also mean every file on disk
-        // is readable: this is how #95-class "agent read anything" bugs get in.
+        // Empty scope means whole index searchable, not every file on disk readable.
         let roots: Vec<String> = Vec::new();
         let excluded: Vec<String> = vec!["db".to_string(), "sqlite".to_string()];
 
@@ -1010,7 +911,6 @@ mod scope_tests {
             "/home/u/project/README.md"
         ));
 
-        // Known credential filenames.
         assert!(!agent_read_allowed(
             &roots,
             &excluded,
@@ -1019,16 +919,13 @@ mod scope_tests {
         assert!(!agent_read_allowed(&roots, &excluded, "/home/u/id_rsa"));
         assert!(!agent_read_allowed(&roots, &excluded, "/srv/app/.env"));
 
-        // Credential extensions, whatever the configured index excludes say.
         assert!(!agent_read_allowed(&roots, &[], "/home/u/certs/server.pem"));
         assert!(!agent_read_allowed(&roots, &[], "/home/u/private.KEY"));
         assert!(!agent_read_allowed(&roots, &[], "/home/u/client.pfx"));
 
-        // Extensions the user excluded from the index are not readable either.
         assert!(!agent_read_allowed(&roots, &excluded, "/home/u/app.sqlite"));
         assert!(!agent_read_allowed(&roots, &excluded, "/home/u/state.db"));
 
-        // Scope still wins when it is configured.
         let scoped = vec!["/home/u/project".to_string()];
         assert!(!agent_read_allowed(
             &scoped,
@@ -1088,9 +985,7 @@ mod scope_tests {
     #[test]
     fn empty_roots_allow_anything() {
         assert!(agent_path_allowed(&[], "/etc/passwd"));
-        // The normalization preserves POSIX roots, so with no configured
-        // roots the request passes through lexically unchanged. Windows
-        // renders the POSIX root with the native separator.
+        // Windows renders the POSIX root with the native separator.
         let expected = if cfg!(windows) {
             r"\tmp\demo"
         } else {
@@ -1104,9 +999,6 @@ mod scope_tests {
 
     #[test]
     fn lexical_normalization_stays_above_root() {
-        // Traversing above the root collides with the root in both cases,
-        // but the fallback `..` for relative escapes is rendered with the
-        // native separator on Windows.
         let (above_root, relative_escape) = if cfg!(windows) {
             (r"\", r"..\a")
         } else {
@@ -1151,15 +1043,12 @@ mod scope_tests {
             excluded_extensions: Vec::new(),
         };
 
-        // With no roots the whole index is visible, so an `in:` scope is not
-        // a privilege escalation.
         assert!(
             AgentPolicy::default()
                 .validate_query_scope("in:\"/etc\" x")
                 .is_ok()
         );
 
-        // An include inside the root is allowed.
         let inside = root.join("sub").to_string_lossy().into_owned();
         assert!(
             policy
@@ -1167,8 +1056,6 @@ mod scope_tests {
                 .is_ok()
         );
 
-        // An include outside the root is rejected; appending the roots to the
-        // caller query would otherwise OR both scopes together.
         assert!(policy.validate_query_scope("in:\"/etc\" x").is_err());
         assert!(
             policy
@@ -1176,7 +1063,6 @@ mod scope_tests {
                 .is_err()
         );
 
-        // Negated scopes only narrow, so they stay allowed.
         assert!(policy.validate_query_scope("x -in:\"/etc\"").is_ok());
     }
 }

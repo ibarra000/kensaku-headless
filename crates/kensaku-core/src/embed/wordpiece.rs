@@ -214,9 +214,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A tiny WordPiece tokenizer.json equivalent. Vocab deliberately chosen
-    /// so greedy longest-match matters: "unbelievable" splits, "un ##broken"
-    /// hits whole-word pieces.
+    /// Vocab chosen so greedy longest-match matters.
     fn tokenizer() -> WordPieceTokenizer {
         let value = json!({
             "model": {
@@ -257,7 +255,6 @@ mod tests {
     fn parse_applies_documented_defaults() {
         let value = json!({ "model": { "vocab": { "dog": 5 } } });
         let t = WordPieceTokenizer::parse(&value, None).unwrap();
-        // Special-token ids fall back to the standard BERT positions.
         assert_eq!(t.unknown_id, 100);
         assert_eq!(t.cls_id, 101);
         assert_eq!(t.sep_id, 102);
@@ -269,11 +266,9 @@ mod tests {
     #[test]
     fn pre_tokenize_splits_on_punctuation_and_cjk_per_char() {
         let t = tokenizer();
-        // ASCII punctuation is its own token.
         assert_eq!(t.pre_tokenize("end.start"), vec!["end", ".", "start"]);
         // CJK chars split one-by-one, even glued to latin words.
         assert_eq!(t.pre_tokenize("世界一dogs"), vec!["世", "界", "一", "dogs"]);
-        // Hiragana and Hangul ranges too.
         assert_eq!(
             t.pre_tokenize("かなハンabc"),
             vec!["か", "な", "ハ", "ン", "abc"]
@@ -300,7 +295,6 @@ mod tests {
         let t = tokenizer();
         // Tabs, newlines and long space runs never produce empty words.
         assert_eq!(t.pre_tokenize("  a\t\tb\n\nc  "), vec!["a", "b", "c"]);
-        // Empty/whitespace-only input produces nothing.
         assert!(t.pre_tokenize("").is_empty());
         assert!(t.pre_tokenize(" \t\r\n").is_empty());
     }
@@ -311,7 +305,6 @@ mod tests {
         let mut ids = Vec::new();
         t.tokenize_word("dog", &mut ids);
         assert_eq!(ids, vec![13]);
-        // Empty word contributes nothing.
         t.tokenize_word("", &mut ids);
         assert_eq!(ids, vec![13]);
     }
@@ -320,11 +313,9 @@ mod tests {
     fn tokenize_word_greedily_matches_longest_pieces() {
         let t = tokenizer();
         let mut ids = Vec::new();
-        // "unbelievable" is not in vocab; greedy left-to-right finds
-        // "un" + "##believable" (not just "un" + fragments).
+        // Not in vocab: greedy finds "un" + "##believable".
         t.tokenize_word("unbelievable", &mut ids);
         assert_eq!(ids, vec![10, 12]);
-        // Continuation piece must carry the ## prefix.
         let mut ids = Vec::new();
         t.tokenize_word("doghouse", &mut ids);
         assert_eq!(ids, vec![13, 15]);
@@ -333,13 +324,11 @@ mod tests {
     #[test]
     fn tokenize_word_unknown_when_no_piece_fits_or_word_too_long() {
         let t = tokenizer();
-        // No prefix in vocab at all -> [UNK].
         let mut ids = Vec::new();
         t.tokenize_word("zzz", &mut ids);
         assert_eq!(ids, vec![0]);
 
-        // Longer than max_input_chars_per_word (20) -> [UNK] even though
-        // every piece individually exists.
+        // Over max_input_chars_per_word -> [UNK] even if every piece exists.
         let mut ids = Vec::new();
         t.tokenize_word("unbelievablex!", &mut ids);
         assert_eq!(ids, vec![0]);
@@ -349,7 +338,6 @@ mod tests {
     fn token_ids_of_empty_text_are_empty_and_list_partial_words() {
         let t = tokenizer();
         assert!(t.token_ids("").is_empty());
-        // Blend of known word and unknown word per word.
         assert_eq!(t.token_ids("dog zzz"), vec![13, 0]);
     }
 
@@ -380,7 +368,7 @@ mod tests {
         assert_eq!(ids.len(), max_len);
         assert_eq!(mask.len(), max_len);
         assert_eq!(types.len(), max_len);
-        // Content is capped at max_len - 2, specials included.
+        // Content is capped at max_len - 2.
         assert_eq!(ids.first(), Some(&1));
         assert_eq!(ids.last(), Some(&2));
     }
@@ -400,12 +388,10 @@ mod tests {
         assert!((v[0] - 0.6).abs() < 1e-6);
         assert!((v[1] - 0.8).abs() < 1e-6);
 
-        // All-zero vector stays all-zero (norm 0 branch).
         let mut zero = vec![0.0f32; 4];
         l2_normalize(&mut zero);
         assert_eq!(zero, vec![0.0; 4]);
 
-        // Empty slice is fine.
         let mut empty: Vec<f32> = Vec::new();
         l2_normalize(&mut empty);
         assert!(empty.is_empty());

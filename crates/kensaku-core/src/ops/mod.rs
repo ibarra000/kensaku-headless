@@ -1,7 +1,4 @@
-//! Headless operations.
-//!
-//! Plain-Rust entry points shared by every surface (CLI, daemon RPC, HTTP,
-//! MCP, and Rust embedders). Nothing in here knows about a UI or a transport.
+//! Transport-agnostic operations shared by CLI, daemon RPC, HTTP, MCP and embedders.
 
 pub mod admin;
 pub mod files;

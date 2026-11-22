@@ -30,7 +30,7 @@ fn main() {
     let start = Instant::now();
     ocr::self_test().expect("real OCR runtime and pack must be usable");
     println!("Initialization: {:.3} s", start.elapsed().as_secs_f64());
-    // Callers wait on extraction slots; all inference still runs in the app pool.
+    // Callers wait on extraction slots; inference runs in the app pool.
     let callers = rayon::ThreadPoolBuilder::new()
         .num_threads(8)
         .build()

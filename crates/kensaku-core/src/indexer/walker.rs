@@ -11,28 +11,22 @@ pub struct FileEntry {
     pub id: u64,
     pub path: PathBuf,
     pub name: String,
-    /// Interned (lowercase) extension. Extensions repeat heavily, so a
-    /// process-wide `&'static str` avoids one heap allocation per entry during
-    /// a full crawl while keeping `Option<&str>` call sites unchanged.
+    /// Interned lowercase extension (avoids one allocation per entry).
     pub extension: Option<&'static str>,
     pub size: u64,
     pub modified: u64,
     pub is_dir: bool,
-    /// Filesystem device id (`st_dev`). `0` means unknown.
+    /// `st_dev`; `0` means unknown.
     pub dev: u64,
-    /// Filesystem inode number (`st_ino`). `0` means unknown.
+    /// `st_ino`; `0` means unknown.
     pub ino: u64,
-    /// 64-bit character presence bitmask for fast prefiltering.
+    /// Character presence bitmask for prefiltering.
     pub char_bloom: u64,
-    /// True when the entry's content must be re-read even if its mtime/size did
-    /// not change (used to re-run image OCR after the setting is toggled).
+    /// Re-read content even if mtime/size are unchanged (e.g. OCR toggled).
     pub content_pending: bool,
 }
 
-/// Interns an extension for the lifetime of the process.
-///
-/// Unique extensions are a tiny fixed set, so leaking each one once is a
-/// bounded cost and removes the per-entry `String` from a 1M-entry crawl.
+/// Interns an extension for the process lifetime (a small, bounded leak).
 pub fn intern_extension(extension: Option<&str>) -> Option<&'static str> {
     let extension = extension?.trim().trim_start_matches('.');
     if extension.is_empty() {
@@ -56,11 +50,7 @@ pub fn intern_extension(extension: Option<&str>) -> Option<&'static str> {
     Some(interned)
 }
 
-/// Returns `(device_id, inode)` for a filesystem metadata entry.
-///
-/// These values form the stable identity of a file across path-based renames
-/// and replacements. On non-Unix platforms they are unavailable and default
-/// to `0`, which callers treat as "unknown".
+/// `(device_id, inode)` identity across renames; `0` (unknown) off Unix.
 pub fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
     #[cfg(unix)]
     {
@@ -74,16 +64,8 @@ pub fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
     }
 }
 
-/// True when the file is a cloud-backed placeholder that would be hydrated
-/// (downloaded) if its contents were read.
-///
-/// - Windows (OneDrive, Dropbox, iCloud for Windows): the offline /
-///   recall-on-data-access attributes.
-/// - macOS (iCloud Drive with "Optimize Mac Storage", Desktop & Documents in
-///   iCloud, File Provider apps): APFS marks evicted files `SF_DATALESS`.
-///   `stat` never downloads them, but reading even one byte does, so before
-///   this check indexing quietly downloaded the user's whole cloud library.
-/// - Linux has no common equivalent; returns `false`.
+/// True for a cloud placeholder that reading would hydrate (Windows offline/recall attrs,
+/// macOS `SF_DATALESS`); always false on Linux.
 #[cfg(windows)]
 pub fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -110,8 +92,7 @@ pub fn is_cloud_placeholder(_meta: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Convenience wrapper for callers that only have a path. A `stat`, which
-/// never downloads anything; on Linux it does not touch the filesystem.
+/// Path variant; a `stat` never downloads.
 pub fn is_cloud_placeholder_path(path: &std::path::Path) -> bool {
     #[cfg(any(windows, target_os = "macos"))]
     {
@@ -126,33 +107,18 @@ pub fn is_cloud_placeholder_path(path: &std::path::Path) -> bool {
     }
 }
 
-/// Directories whose entire subtree the crawler must never enter.
-///
-/// Kensaku's own runtime data (config, SQLite metadata, Tantivy index,
-/// thumbnails, OCR model packs, the daemon socket) lives under
-/// [`crate::config::KensakuConfig::config_dir`]. On macOS that is
-/// `~/Library/Application Support/kensaku` — *not* a hidden path — so a
-/// home-rooted crawl would otherwise walk its own index while it writes it:
-/// thousands of files, re-processed on every change. On Linux the config
-/// directory starts with `.` and `skip_hidden` already hides it; on Windows it
-/// is `%APPDATA%\kensaku`, also not dot-prefixed. The explicit prune is
-/// correct on every platform and costs one path comparison per entry.
+/// Kensaku's own runtime dir, never crawled (not dot-prefixed on macOS/Windows).
 pub fn runtime_dir_prunes() -> Vec<PathBuf> {
     vec![crate::config::KensakuConfig::config_dir()]
 }
 
-/// The OS's application-data tree directly under the home folder:
-/// `%USERPROFILE%\AppData` on Windows, `~/Library` on macOS. Browser caches,
-/// app containers and logs: huge, constantly changing, and never what a
-/// file search is for. (Linux keeps this in dot-folders, already hidden.)
+/// OS app-data trees under home (`AppData`, `~/Library`): caches and logs, never search targets.
 pub fn system_data_dirs() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
     if cfg!(windows) {
-        // CrossDevice: Phone Link exposes a connected phone here as a live
-        // cloud-files folder. Listing it asks the phone over Wi-Fi, and when
-        // the phone is away Windows pops "<phone> is offline" every time.
+        // Phone Link's CrossDevice listing hits the phone over Wi-Fi and pops "offline" dialogs.
         vec![home.join("AppData"), home.join("CrossDevice")]
     } else if cfg!(target_os = "macos") {
         vec![home.join("Library")]
@@ -161,11 +127,7 @@ pub fn system_data_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// Everything a walk or watch over `roots` must not enter: Kensaku's own
-/// data always, plus the OS data trees, except one that a root lives inside.
-/// Someone who adds iCloud Drive (`~/Library/Mobile Documents/...`) on
-/// purpose gets it; someone who adds their home folder does not get
-/// `~/Library` with it.
+/// Prunes for a walk/watch over `roots`: runtime data always, OS data trees unless a root lies inside.
 pub fn prunes_for_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     prunes_for_roots_with(roots, system_data_dirs())
 }
@@ -180,10 +142,7 @@ fn prunes_for_roots_with(roots: &[PathBuf], system: Vec<PathBuf>) -> Vec<PathBuf
     prunes
 }
 
-/// True when `meta` is a cloud-backed folder whose listing is not on disk,
-/// so reading it would make the provider fetch it (OneDrive "online-only"
-/// folders, Phone Link, macOS File Provider). The folder itself stays
-/// findable by name; the walk just does not descend into it.
+/// True for a cloud folder whose listing is not on disk; it stays findable but is not descended.
 #[cfg(windows)]
 pub fn is_unpopulated_cloud_dir(meta: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -209,17 +168,11 @@ pub fn is_unpopulated_cloud_dir(_meta: &std::fs::Metadata) -> bool {
     false
 }
 
-/// True when `path` lives at or below any of `prune_roots`.
 pub fn starts_with_any(path: &std::path::Path, prune_roots: &[PathBuf]) -> bool {
     prune_roots.iter().any(|root| path.starts_with(root))
 }
 
 /// Default-deny sensitive names, shared by the crawler and the watcher.
-///
-/// These are skipped even if the user has not added them to exclusions. Hidden
-/// entries (names starting with '.') are also skipped by the walk, which covers
-/// `~/.ssh`, `~/.gnupg`, `~/.aws` and friends; the explicit list keeps the
-/// policy intact when a caller or platform does not skip hidden entries.
 pub const SENSITIVE_NAMES: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -235,16 +188,12 @@ pub const SENSITIVE_NAMES: &[&str] = &[
     "keepassxc",
 ];
 
-/// Whether `name` is a sensitive file or directory name.
-///
-/// `.env` is matched as a prefix so `.env.local`, `.env.production` and any
-/// future variant are covered without extending the list.
+/// Whether `name` is sensitive; `.env` matches as a prefix.
 pub fn is_sensitive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == ".env" || lower.starts_with(".env.") || SENSITIVE_NAMES.contains(&lower.as_str())
 }
 
-/// True when `path` or any of its components is a sensitive name.
 pub fn is_sensitive_path(path: &std::path::Path) -> bool {
     path.components().any(|component| {
         component
@@ -254,15 +203,7 @@ pub fn is_sensitive_path(path: &std::path::Path) -> bool {
     })
 }
 
-/// Walks `dirs` and returns file entries.
-///
-/// When `include_ignored` is false (the default), `.gitignore` /
-/// `.cursorignore` rules under the roots are honored so agents see the same
-/// tree developers do; see [`crate::indexer::ignore`]. The walk itself still
-/// traverses ignored directories (the cheap default `excluded_dirs` list
-/// handles the heavy hitters); their entries are filtered before returning.
-/// `skip_hidden` controls dot-prefixed entries beneath each root; explicitly
-/// selected roots are still walked. Sensitive names remain excluded either way.
+/// Walks `dirs`, honoring ignore files unless `include_ignored`; sensitive names are always excluded.
 pub fn walk_directories(
     dirs: &[PathBuf],
     excluded_dirs: &[String],
@@ -273,11 +214,7 @@ pub fn walk_directories(
     walk_directories_until(dirs, excluded_dirs, include_ignored, skip_hidden, &never)
 }
 
-/// [`walk_directories`] that stops as soon as `cancel` is set.
-///
-/// A cancelled walk returns nothing rather than a partial list, and leaves the
-/// active ignore rules untouched: a partial list would look to the caller like
-/// every unvisited file had been deleted.
+/// [`walk_directories`] that returns nothing if cancelled (a partial list would read as deletions).
 pub fn walk_directories_until(
     dirs: &[PathBuf],
     excluded_dirs: &[String],
@@ -302,14 +239,11 @@ pub fn walk_directories_until(
                 move |_depth, _path, _read_dir_state, children| {
                     children.retain(|dir_entry_result| {
                         if let Ok(entry) = dir_entry_result {
-                            // Kensaku's own runtime data: never crawl it
-                            // (macOS path, see `runtime_dir_prunes`).
                             if starts_with_any(&entry.path(), &prune_roots) {
                                 return false;
                             }
                             let name = entry.file_name.to_string_lossy().to_lowercase();
-                            // Belt-and-suspenders for platforms where jwalk's
-                            // hidden-entry filtering is unsupported.
+                            // jwalk's hidden filtering is unsupported on some platforms.
                             if skip_hidden && name.starts_with('.') {
                                 return false;
                             }
@@ -322,11 +256,7 @@ pub fn walk_directories_until(
                         }
                         true
                     });
-                    // Keep cloud-only folders as entries, but never list
-                    // their contents: that is a network fetch (and, for a
-                    // phone over Phone Link, an "offline" popup). Detection
-                    // is Windows/macOS-only, so other platforms skip the
-                    // extra per-directory stat entirely.
+                    // Keep cloud-only folders as entries but never list them (network fetch).
                     #[cfg(any(windows, target_os = "macos"))]
                     for entry in children.iter_mut().flatten() {
                         if entry.file_type.is_dir()
@@ -396,17 +326,13 @@ pub fn walk_directories_until(
         }
     }
 
-    // Ignore parity: probe each visited directory for `.gitignore` /
-    // `.cursorignore` and drop ignored entries.
     {
         let ignore_set = if include_ignored {
             IgnoreSet::empty()
         } else {
             IgnoreSet::from_directories(&ignore_dirs)
         };
-        // The watcher runs between crawls and has no directory list of its
-        // own; it reads these rules so an edit inside an ignored tree does not
-        // put the file back into the index.
+        // Shared with the watcher so edits in ignored trees stay out of the index.
         crate::indexer::ignore::set_active(ignore_set.clone());
         if !include_ignored && !ignore_set.is_empty() {
             result.retain(|entry| !ignore_set.is_ignored(&entry.path, entry.is_dir));
@@ -588,11 +514,9 @@ mod tests {
     fn system_data_is_pruned_unless_a_root_lives_inside_it() {
         let home = PathBuf::from("/home/me");
         let library = home.join("Library");
-        // Home picked: ~/Library is skipped.
         let prunes = prunes_for_roots_with(std::slice::from_ref(&home), vec![library.clone()]);
         assert!(starts_with_any(&library.join("Caches/x"), &prunes));
         assert!(!starts_with_any(&home.join("Documents/a.txt"), &prunes));
-        // iCloud Drive picked on purpose: it is indexed.
         let icloud = library.join("Mobile Documents/com~apple~CloudDocs");
         let prunes = prunes_for_roots_with(&[home.clone(), icloud.clone()], vec![library.clone()]);
         assert!(!starts_with_any(&icloud.join("notes.txt"), &prunes));
@@ -603,8 +527,6 @@ mod tests {
         let prunes = runtime_dir_prunes();
         assert!(!prunes.is_empty());
         let config_dir = crate::config::KensakuConfig::config_dir();
-        // The config dir itself, and everything inside it (index/, thumbs/,
-        // tessdata/, models/), are pruned; siblings are not.
         assert!(starts_with_any(&config_dir, &prunes));
         assert!(starts_with_any(&config_dir.join("index"), &prunes));
         assert!(config_dir.join("index").join("tantivy").is_absolute() == config_dir.is_absolute());
@@ -612,14 +534,11 @@ mod tests {
             &config_dir.join("thumbs").join("a.jpg"),
             &prunes
         ));
-        // A sibling directory that merely shares a name prefix must not be
-        // pruned (e.g. `kensaku-backup` next to `kensaku`).
+        // A sibling sharing a name prefix must not be pruned.
         let sibling = config_dir.parent().map(|p| p.join("kensaku-backup"));
         if let Some(sibling) = sibling {
             assert!(!starts_with_any(&sibling, &prunes));
         }
-        // A path with the config dir as an ancestor component must also be
-        // pruned wherever it appears under a watched root.
         assert!(starts_with_any(
             &config_dir.join("models").join("det.onnx"),
             &prunes
@@ -628,9 +547,7 @@ mod tests {
 
     #[test]
     fn walker_never_enters_its_own_runtime_dir() {
-        // Build a fake tree: watched_root/Library/... sits next to Kensaku's
-        // config dir, mimicking the macOS layout
-        // (config dir = ~/Library/Application Support/kensaku).
+        // Fake macOS-like layout: watched_root/Library next to the config dir.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -643,10 +560,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
 
         let config_dir = crate::config::KensakuConfig::config_dir();
-        // The suite cannot override `dirs::config_dir()` safely in parallel
-        // tests, so instead prove that walk_directories prunes whatever the
-        // *current* runtime dir would be, plus that ordinary entries still
-        // survive. Create an ordinary file under the root.
+        // `dirs::config_dir()` cannot be overridden in parallel tests; prune whatever it is.
         let root = base.join("root");
         let docs = root.join("Documents");
         std::fs::create_dir_all(&docs).unwrap();
@@ -657,8 +571,6 @@ mod tests {
             entries.iter().any(|e| e.path == root.join("Documents")),
             "ordinary directories must survive the prune"
         );
-        // Nothing inside Kensaku's runtime dir can appear in the results:
-        // every entry under the config dir would start with it.
         assert!(
             !entries
                 .iter()

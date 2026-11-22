@@ -1,8 +1,4 @@
-//! Local semantic model artifact manager.
-//!
-//! Kensaku ships without the Potion embedding weights. This module tracks the
-//! three files needed by the semantic layer, downloads the missing ones from
-//! HuggingFace in a single background thread, and exposes progress to the UI.
+//! Downloads and tracks optional model/OCR packs (not bundled), one download at a time.
 
 use crate::config::KensakuConfig;
 use serde::Serialize;
@@ -11,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// Size of the read buffer, and therefore the progress update interval.
+/// Read buffer size; also the progress update interval.
 const CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -22,7 +18,7 @@ pub struct Artifact {
     pub sha256: Option<&'static str>,
 }
 
-/// Static manifest of the files required by the semantic model.
+/// Files required by the semantic model.
 const ARTIFACTS: [Artifact; 3] = [
     Artifact {
         name: "model.safetensors",
@@ -81,11 +77,7 @@ const OCR_ARTIFACTS: [Artifact; 3] = [
     },
 ];
 
-/// Optional ONNX smart embedding pack (bge-small-en-v1.5 int8).
-/// Optional Indra OCR pack (datalab-to/indra-ocr, pinned to the v1.1.0 model
-/// tag): detector, orientation and script classifiers, four recognizers and
-/// their vocabularies. Weights under a modified OpenRAIL-M license, so they
-/// are downloaded only when the user selects Indra.
+/// Optional Indra OCR pack (pinned to v1.1.0); OpenRAIL-M weights, downloaded only on request.
 const INDRA_ARTIFACTS: [Artifact; 8] = [
     Artifact {
         name: "det.onnx",
@@ -191,10 +183,7 @@ pub const SMART_ARTIFACTS: [Artifact; 3] = [
     },
 ];
 
-/// Optional ONNX visual embedding pack (CLIP ViT-B/32 int8).
-///
-/// The vision and text encoders must share one embedding space. `tokenizer.json`
-/// is the matching CLIP byte-level BPE tokenizer.
+/// Optional CLIP ViT-B/32 int8 pack; vision and text encoders share one space.
 pub const VISUAL_ARTIFACTS: [Artifact; 4] = [
     Artifact {
         name: "vision_model.onnx",
@@ -248,8 +237,7 @@ pub struct ModelProgress {
     pub file: String,
     pub downloaded: u64,
     pub total: u64,
-    /// "verifying" while an existing artifact's checksum is being checked,
-    /// "downloading" while bytes are being fetched.
+    /// "verifying" or "downloading".
     pub phase: String,
 }
 
@@ -265,9 +253,7 @@ pub struct ModelsStatus {
     pub total_present_bytes: u64,
 }
 
-/// Which pack a download belongs to. Progress and errors are reported only by
-/// the status of the pack actually being fetched; otherwise every pack's card
-/// claimed to be downloading whenever any one of them was.
+/// Pack a download belongs to, so status never leaks across packs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pack {
     Models,
@@ -301,8 +287,7 @@ impl Pack {
 const BUSY_DOWNLOAD: &str =
     "Another model download is already running. Try again when it finishes.";
 
-/// The single in-flight download, plus the last error, each tagged with the
-/// pack it belongs to so one pack's state never leaks into another's status.
+/// The single in-flight download and last error, tagged by pack.
 #[derive(Default)]
 struct DownloadState {
     running: Option<Pack>,
@@ -311,7 +296,6 @@ struct DownloadState {
 }
 
 impl DownloadState {
-    /// What a status for `pack` should report.
     fn view(&self, pack: Option<Pack>) -> (bool, Option<ModelProgress>, Option<String>) {
         let downloading = pack.is_some() && self.running == pack;
         let progress = if downloading {
@@ -364,7 +348,7 @@ pub fn models_dir() -> PathBuf {
     KensakuConfig::config_dir().join("models")
 }
 
-/// Creates the models directory (0700 on unix) if needed.
+/// Creates the models directory (0700 on unix).
 fn ensure_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create models directory {}: {}", dir.display(), e))?;
@@ -377,12 +361,11 @@ fn ensure_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Current artifact inventory, derived entirely from disk.
+/// Inventory derived entirely from disk.
 pub fn status() -> ModelsStatus {
     status_for(&models_dir(), &ARTIFACTS)
 }
 
-/// Current optional OCR pack inventory.
 pub fn ocr_status() -> ModelsStatus {
     status_for(&crate::ocr::pack_dir(), &OCR_ARTIFACTS)
 }
@@ -391,11 +374,7 @@ pub fn indra_status() -> ModelsStatus {
     status_for(&crate::ocr_indra::pack_dir(), &INDRA_ARTIFACTS)
 }
 
-/// Every artifact of `list` exists at its expected size.
-///
-/// The engine modules use this instead of a bare `is_file()` check so a stale
-/// or truncated pack is reported as not downloaded, and the Download action
-/// replaces it, rather than loading it and reading nothing.
+/// Every artifact exists at its expected size (stale/truncated packs count as missing).
 fn artifacts_present(dir: &Path, list: &[Artifact]) -> bool {
     list.iter().all(|artifact| {
         std::fs::metadata(dir.join(artifact.name))
@@ -407,12 +386,10 @@ fn artifacts_present(dir: &Path, list: &[Artifact]) -> bool {
     })
 }
 
-/// True when the PP-OCR pack files are present at their expected sizes.
 pub fn ocr_pack_present() -> bool {
     artifacts_present(&crate::ocr::pack_dir(), &OCR_ARTIFACTS)
 }
 
-/// True when the Indra pack files are present at their expected sizes.
 pub fn indra_pack_present() -> bool {
     artifacts_present(&crate::ocr_indra::pack_dir(), &INDRA_ARTIFACTS)
 }
@@ -462,11 +439,7 @@ fn status_for(dir: &Path, artifacts_list: &[Artifact]) -> ModelsStatus {
         } else {
             0
         };
-        // A file at the wrong size is not usable: it is a stale pack from an
-        // older version, a truncated download, or a copy someone interrupted.
-        // Reporting it as present (`ready: true`) made the app run the engine
-        // against it and then say the engine "read nothing" (#174). Treating it
-        // as missing routes the user to Download, which verifies and replaces it.
+        // A wrong-size file is stale or truncated; treat it as missing so Download replaces it (#174).
         let present =
             is_file && (artifact.bytes_expected == 0 || bytes_on_disk == artifact.bytes_expected);
 
@@ -497,35 +470,26 @@ fn status_for(dir: &Path, artifacts_list: &[Artifact]) -> ModelsStatus {
     }
 }
 
-/// Starts a background download of every missing artifact.
-///
-/// Returns immediately. Returns [`BUSY_DOWNLOAD`] if another pack is already
-/// downloading, so callers can tell the user instead of failing silently.
+/// Returns immediately, or [`BUSY_DOWNLOAD`] if another pack is downloading.
 pub fn download_all() -> Result<(), String> {
     start_download(models_dir(), &ARTIFACTS, "kensaku-model-download", "model")
 }
 
-/// Called once an OCR pack (PP-OCR or Indra) has finished downloading and
-/// verifying.
+/// Called once an OCR pack finishes downloading and verifying.
 static OCR_PACK_READY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
-/// Called once the semantic model files have finished downloading and
-/// verifying. The registry is reloaded before the callback runs, so a callback
-/// that starts a reindex sees the real model rather than the fallback.
+/// Called after the semantic files verify; the registry is reloaded first.
 static SEMANTIC_MODELS_READY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
-/// Registers what to do when the semantic model files become available.
 pub fn on_semantic_models_ready(callback: impl Fn() + Send + Sync + 'static) {
     let _ = SEMANTIC_MODELS_READY.set(Box::new(callback));
 }
 
-/// Registers what to do when the OCR pack becomes available (start a crawl
-/// so already-indexed images are OCR'd). First registration wins.
+/// First registration wins.
 pub fn on_ocr_pack_ready(callback: impl Fn() + Send + Sync + 'static) {
     let _ = OCR_PACK_READY.set(Box::new(callback));
 }
 
-/// Starts a background download of the optional accurate OCR pack.
 pub fn download_ocr_pack() -> Result<(), String> {
     start_download(
         crate::ocr::pack_dir(),
@@ -535,7 +499,6 @@ pub fn download_ocr_pack() -> Result<(), String> {
     )
 }
 
-/// Starts a background download of the optional Indra OCR pack.
 pub fn download_indra_pack() -> Result<(), String> {
     start_download(
         crate::ocr_indra::pack_dir(),
@@ -545,7 +508,6 @@ pub fn download_indra_pack() -> Result<(), String> {
     )
 }
 
-/// Starts a background download of the optional ONNX smart embedding pack.
 pub fn download_smart_pack() -> Result<(), String> {
     start_download(
         smart_dir(),
@@ -555,7 +517,6 @@ pub fn download_smart_pack() -> Result<(), String> {
     )
 }
 
-/// Starts a background download of the optional ONNX visual embedding pack.
 pub fn download_visual_pack() -> Result<(), String> {
     start_download(
         visual_dir(),
@@ -614,9 +575,7 @@ fn run_download(dir: PathBuf, artifacts: &'static [Artifact], pack: Pack, label:
         Ok(()) => {
             set_progress(pack, None);
             set_error(pack, None);
-            // A self-test that failed against an older or truncated pack must
-            // not outlive the download that fixed it: without this the engine
-            // stayed "broken" until the app restarted (#174).
+            // Reset the self-test so a failure against the old pack doesn't persist (#174).
             match pack {
                 Pack::Ocr => crate::ocr::reset_self_test(),
                 Pack::Indra => crate::ocr_indra::reset_self_test(),
@@ -625,15 +584,12 @@ fn run_download(dir: PathBuf, artifacts: &'static [Artifact], pack: Pack, label:
             if matches!(pack, Pack::Ocr | Pack::Indra)
                 && let Some(callback) = OCR_PACK_READY.get()
             {
-                // Clear the flag first so a callback that checks status sees
-                // the download as finished.
+                // Clear first so a callback checking status sees the download finished.
                 set_running(None);
                 callback();
             }
             if pack == Pack::Models {
-                // Without this the files sat on disk while search kept ranking
-                // on the hashing fallback, because the registry was built once
-                // at startup and never rebuilt.
+                // Reload so search switches off the hashing fallback immediately.
                 let changed = crate::embed::ModelRegistry::reload();
                 set_running(None);
                 if let Some(callback) = SEMANTIC_MODELS_READY.get() {
@@ -681,8 +637,7 @@ fn download_missing_for(
 
     let total_bytes: u64 = artifacts.iter().map(|a| a.bytes_expected).sum();
     let mut completed_bytes: u64 = 0;
-    // Always verify an existing artifact. A truncated or corrupt final file is
-    // removed and downloaded again instead of being trusted by name alone.
+    // Always verify existing files; corrupt ones are re-downloaded.
     for artifact in artifacts {
         download_one(dir, artifact, pack, total_bytes, completed_bytes)?;
         completed_bytes = completed_bytes.saturating_add(artifact.bytes_expected);
@@ -718,8 +673,7 @@ fn download_one(
 ) -> Result<(), String> {
     let final_path = dir.join(artifact.name);
     if final_path.is_file() {
-        // Show "verifying" instead of a misleading 0% while the existing
-        // file's checksum is being read.
+        // Show "verifying" rather than 0% while checksumming.
         set_progress(
             pack,
             Some(ModelProgress {
@@ -919,7 +873,6 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hex)
 }
 
-/// Removes every model artifact and resets progress/error state.
 pub fn delete_all() -> Result<(), String> {
     if download_running() {
         return Err("A model download is in progress. Try again once it finishes.".to_string());
@@ -959,19 +912,17 @@ mod tests {
             error: Some((Pack::Models, "model download failed".to_string())),
         };
 
-        // The pack being fetched reports the download and its progress.
         let (downloading, progress, error) = state.view(Some(Pack::Ocr));
         assert!(downloading);
         assert_eq!(progress.map(|p| p.file), Some("ppocr.onnx".to_string()));
         assert_eq!(error, None, "another pack's error must not leak in");
 
-        // A different pack is idle, even while PP-OCR downloads.
+        // A different pack stays idle.
         let (downloading, progress, error) = state.view(Some(Pack::Indra));
         assert!(!downloading);
         assert!(progress.is_none());
         assert_eq!(error, None);
 
-        // The semantic model's error belongs to the semantic card.
         let (downloading, progress, error) = state.view(Some(Pack::Models));
         assert!(!downloading);
         assert!(progress.is_none());

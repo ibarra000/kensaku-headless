@@ -55,7 +55,6 @@ pub fn route_query(query: &Query) -> QueryRoute {
         return QueryRoute::ContentPhrase;
     }
 
-    // Check tokens and spaces
     let tokens_count = query.terms.len();
     let has_space = raw_trimmed.chars().any(|c| c.is_whitespace());
 

@@ -1,11 +1,7 @@
-//! Battery detection for eco crawling.
-//!
-//! All implementations are best-effort and fail soft: an unknown state is
-//! treated as AC power, so indexing is never paused or slowed by a probe error.
+//! Battery/load detection for eco crawling; unknown states count as AC power.
 
 use crate::config::CrawlMode;
 
-/// True only in `eco` mode while the machine is running on battery.
 pub fn should_pace(crawl_mode: CrawlMode) -> bool {
     crawl_mode == CrawlMode::Eco && (on_battery() || heavy_load())
 }
@@ -68,12 +64,11 @@ pub fn on_battery() -> bool {
 pub fn on_battery() -> bool {
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
-        /// Minutes remaining on battery, or a negative sentinel for
-        /// unlimited/unknown.
+        /// Minutes left on battery; negative means unlimited or unknown.
         fn IOPSGetTimeRemainingEstimate() -> f64;
     }
 
-    // -2.0 = unlimited (AC), -1.0 = unknown; battery estimates are >= 0.
+    // -2.0 = unlimited (AC), -1.0 = unknown.
     unsafe { IOPSGetTimeRemainingEstimate() >= 0.0 }
 }
 
@@ -102,9 +97,7 @@ pub fn heavy_load() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn heavy_load() -> bool {
-    // `getloadavg` is a 1-minute load average read, available on every macOS
-    // release, so eco mode paces the crawl on a busy Mac the same way it does
-    // on Linux. Failures degrade to "not heavy" (never throttles).
+    // Failures degrade to "not heavy" (never throttles).
     let mut averages = [0.0f64; 3];
     let reported =
         unsafe { libc::getloadavg(averages.as_mut_ptr(), averages.len() as libc::c_int) };
@@ -132,15 +125,11 @@ mod tests {
         assert!(!should_pace(CrawlMode::Balanced));
     }
 
-    /// Eco mode calls on_battery() and heavy_load() which do OS I/O. Whatever
-    /// they return, should_pace must not panic.
     #[test]
     fn eco_does_not_panic() {
         let _ = should_pace(CrawlMode::Eco);
     }
 
-    /// on_battery and heavy_load must always return a bool without panicking
-    /// regardless of the host environment.
     #[test]
     fn os_probes_never_panic() {
         let _ = on_battery();

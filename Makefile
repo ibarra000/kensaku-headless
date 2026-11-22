@@ -1,15 +1,4 @@
-# Kensaku — common development tasks.
-#
-#   make            # this help
-#   make build      # release build of the `kensaku` binary
-#   make test       # Rust test suite
-#   make lint       # clippy, warnings as errors
-#   make smoke      # end-to-end headless smoke test
-#   make bench      # filename-search benchmark (needs a directory)
-#   make clean      # remove build outputs (not your data)
-#
-# Data management lives in the binary: `kensaku reset --yes`,
-# `kensaku remove-data --yes`, `kensaku config path`.
+# Kensaku dev tasks; `make` lists them. Data management lives in the binary (`kensaku reset`, `remove-data`).
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help

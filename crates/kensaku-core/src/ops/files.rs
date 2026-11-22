@@ -67,10 +67,7 @@ pub fn build_file_preview(path: &str) -> Result<FilePreview, String> {
         .unwrap_or("")
         .to_lowercase();
 
-    // Raster images are previewed by the client directly. SVG/ICO are handled
-    // the same way (the browser decodes them), but they have no raster
-    // dimensions here. This check runs before any extraction so an image can
-    // never reach tesseract on preview.
+    // Images (incl. SVG/ICO) are previewed by the client; checked before extraction so preview never runs OCR.
     let is_image = crate::indexer::extract::image::is_supported_image_extension(&ext)
         || matches!(ext.as_str(), "svg" | "ico");
     if is_image {
@@ -133,7 +130,6 @@ pub fn build_file_preview(path: &str) -> Result<FilePreview, String> {
     })
 }
 
-/// Cache directory for generated image thumbnails.
 pub fn thumbnail_cache_dir() -> PathBuf {
     KensakuConfig::config_dir().join("thumbs")
 }
@@ -162,15 +158,13 @@ pub fn generate_thumbnail(path: &str) -> Result<String, String> {
         .ok_or_else(|| "Preview path is not valid UTF-8".to_string())
 }
 
-/// Extra facts for the hover card, fetched on demand. Dimensions are read
-/// only for image files, so this never runs during search.
+/// On-demand hover-card details; dimensions only probed for images.
 #[derive(Debug, Clone, Serialize)]
 pub struct FileDetails {
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
 
-/// Image dimensions for `path` (only probed for image extensions).
 pub fn file_details(path: &str) -> FileDetails {
     let p = Path::new(path);
     let is_image = p
@@ -191,7 +185,6 @@ pub fn file_details(path: &str) -> FileDetails {
     }
 }
 
-/// Reads up to 256 KB of extracted text from `path`.
 pub fn read_text(path: &str) -> Result<String, String> {
     crate::indexer::content::read_text_content(Path::new(path), MAX_READ_TEXT_BYTES)
         .ok_or_else(|| "Could not read text content from file".to_string())

@@ -1,18 +1,11 @@
-//! CJK-aware Tantivy tokenizer for Kensaku.
-//!
-//! Provides character-class segmentation and n-gram (unigram + bigram) tokenization
-//! for CJK text (Han, Hiragana, Katakana, Hangul) while preserving Tantivy's
-//! SimpleTokenizer behavior for Latin text, code identifiers, numbers, and paths.
+//! CJK-aware Tantivy tokenizer: unigram + bigram for CJK runs, SimpleTokenizer
+//! behavior elsewhere.
 
 use tantivy::tokenizer::{
     LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer,
 };
 
-/// Returns true if `ch` falls within recognized CJK Unicode blocks:
-/// - Han ideographs (Unified, Extension A, Compatibility, Extensions B-F)
-/// - Hiragana and Katakana (including phonetic extensions and halfwidth)
-/// - Hangul (syllables, jamo, halfwidth)
-/// - Bopomofo
+/// True for Han, Hiragana, Katakana, Hangul and Bopomofo blocks.
 #[inline]
 pub fn is_cjk(ch: char) -> bool {
     matches!(
@@ -35,8 +28,7 @@ pub fn is_cjk(ch: char) -> bool {
     )
 }
 
-/// Tokenizer that segments non-CJK text on non-alphanumeric boundaries
-/// and decomposes CJK text into unigrams and bigrams.
+/// Splits non-CJK text on non-alphanumerics and CJK text into unigrams and bigrams.
 #[derive(Clone, Default)]
 pub struct KensakuTokenizer {
     token: Token,
@@ -69,7 +61,7 @@ impl Tokenizer for KensakuTokenizer {
 
 impl<'a> TokenStream for KensakuTokenStream<'a> {
     fn advance(&mut self) -> bool {
-        // First, exhaust any active CJK run in interleaved unigram -> bigram order
+        // Drain the active CJK run in interleaved unigram -> bigram order.
         if !self.cjk_run.is_empty() {
             while self.cjk_idx < self.cjk_run.len() {
                 if !self.cjk_emit_bigram {
@@ -94,10 +86,8 @@ impl<'a> TokenStream for KensakuTokenStream<'a> {
             self.cjk_emit_bigram = false;
         }
 
-        // Process next characters from stream
         while let Some((offset, ch)) = self.chars.next() {
             if is_cjk(ch) {
-                // Collect entire contiguous CJK run
                 self.cjk_run.clear();
                 self.cjk_run.push((offset, offset + ch.len_utf8()));
                 while let Some(&(next_offset, next_ch)) = self.chars.peek() {
@@ -109,14 +99,12 @@ impl<'a> TokenStream for KensakuTokenStream<'a> {
                         break;
                     }
                 }
-                // Emit first unigram
                 let (from, to) = self.cjk_run[0];
                 self.cjk_idx = 0;
                 self.cjk_emit_bigram = true;
                 self.emit_token(from, to);
                 return true;
             } else if ch.is_alphanumeric() {
-                // Non-CJK alphanumeric run (split on non-alphanumeric or CJK)
                 let start_offset = offset;
                 let mut end_offset = offset + ch.len_utf8();
                 while let Some(&(next_offset, next_ch)) = self.chars.peek() {
@@ -130,7 +118,6 @@ impl<'a> TokenStream for KensakuTokenStream<'a> {
                 self.emit_token(start_offset, end_offset);
                 return true;
             }
-            // Delimiter/whitespace/punctuation - continue
         }
 
         false
@@ -156,8 +143,7 @@ impl<'a> KensakuTokenStream<'a> {
     }
 }
 
-/// Builds the default text analyzer for Kensaku fields using the CJK-aware tokenizer,
-/// length filter, and lowercaser.
+/// Default analyzer: CJK-aware tokenizer, length filter, lowercaser.
 pub fn kensaku_analyzer() -> TextAnalyzer {
     TextAnalyzer::builder(KensakuTokenizer::default())
         .filter(RemoveLongFilter::limit(40))
@@ -199,12 +185,10 @@ mod tests {
             vec!["最", "最終", "終", "終報", "報", "報告", "告", "告書", "書"]
         );
 
-        // Check unigram offsets
         assert_eq!(&tokens[0].text, "最");
         assert_eq!(tokens[0].offset_from, 0);
         assert_eq!(tokens[0].offset_to, 3);
 
-        // Check bigram offsets
         assert_eq!(&tokens[1].text, "最終");
         assert_eq!(tokens[1].offset_from, 0);
         assert_eq!(tokens[1].offset_to, 6);
@@ -213,7 +197,6 @@ mod tests {
         assert_eq!(tokens[5].offset_from, 6);
         assert_eq!(tokens[5].offset_to, 12);
 
-        // Sequential positions
         for (i, t) in tokens.iter().enumerate() {
             assert_eq!(t.position, i);
         }
@@ -250,30 +233,21 @@ mod tests {
         assert_eq!(tokens[0].offset_to, 3);
     }
 
-    // ── Additional Tokenizer & CJK Coverage ───────────────────────────────────
-
     #[test]
     fn is_cjk_boundary_character_blocks() {
-        // Hangul Jamo
         assert!(is_cjk('\u{1100}'));
         assert!(is_cjk('\u{11FF}'));
-        // Hiragana
         assert!(is_cjk('\u{3041}'));
         assert!(is_cjk('\u{3096}'));
-        // Katakana
         assert!(is_cjk('\u{30A1}'));
         assert!(is_cjk('\u{30FA}'));
-        // Bopomofo
         assert!(is_cjk('\u{3105}'));
         assert!(is_cjk('\u{3129}'));
-        // CJK Unified Ideographs
         assert!(is_cjk('\u{4E00}'));
         assert!(is_cjk('\u{9FFF}'));
-        // Hangul Syllables
         assert!(is_cjk('\u{AC00}'));
         assert!(is_cjk('\u{D7AF}'));
 
-        // Non-CJK must return false
         assert!(!is_cjk('a'));
         assert!(!is_cjk('Z'));
         assert!(!is_cjk('9'));
@@ -297,7 +271,6 @@ mod tests {
     fn two_cjk_characters_emit_three_tokens() {
         let tokens = analyze("東京");
         let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-        // Unigram 1, Bigram, Unigram 2
         assert_eq!(texts, vec!["東", "東京", "京"]);
         assert_eq!(tokens[0].offset_from, 0);
         assert_eq!(tokens[0].offset_to, 3);

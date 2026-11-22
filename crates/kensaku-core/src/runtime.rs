@@ -1,10 +1,5 @@
-//! Headless process runtime.
-//!
-//! Everything a process that owns the index (the daemon, or an embedding
-//! application via [`Runtime::start`]) must do before and after opening the
-//! stores: apply pending reset/rebuild markers, reclaim stale artifacts,
-//! install extraction globals from config, take the writer lock, start the
-//! crawl, and wire the pack-download hooks.
+//! Headless runtime for the index owner: apply reset/rebuild markers, reclaim stale artifacts,
+//! install extraction globals, take the writer lock, start the crawl and pack-download hooks.
 
 use crate::config::KensakuConfig;
 use crate::indexer::IndexerManager;
@@ -12,21 +7,18 @@ use crate::{crashlog, maintenance, models};
 use std::fs::File;
 use std::sync::Arc;
 
-/// Name of the exclusive writer lock inside the data directory.
 pub const WRITER_LOCK_FILE: &str = "kensaku.lock";
 
-/// A running index owner. Dropping it releases the writer lock.
+/// A running index owner; dropping it releases the writer lock.
 pub struct Runtime {
     pub indexer: Arc<IndexerManager>,
     _writer_lock: File,
 }
 
-/// Why [`Runtime::start`] could not take ownership of the index.
 #[derive(Debug)]
 pub enum StartError {
     /// Another process (normally the daemon) already owns the index.
     AlreadyRunning,
-    /// The data directory or lock file could not be created.
     Io(String),
 }
 
@@ -42,11 +34,8 @@ impl std::fmt::Display for StartError {
 impl std::error::Error for StartError {}
 
 impl Runtime {
-    /// Takes the writer lock, prepares the data directory, opens the stores
-    /// and starts indexing (when setup is complete).
-    ///
-    /// Only one `Runtime` may exist per data directory; a second returns
-    /// [`StartError::AlreadyRunning`].
+    /// Takes the writer lock, prepares the data dir, opens stores and starts indexing.
+    /// Only one per data directory; a second returns [`StartError::AlreadyRunning`].
     pub fn start() -> Result<Self, StartError> {
         let lock = acquire_writer_lock()?;
         prepare_data_dir();
@@ -72,7 +61,6 @@ impl Runtime {
     }
 }
 
-/// Opens and exclusively locks `<data dir>/kensaku.lock`.
 pub fn acquire_writer_lock() -> Result<File, StartError> {
     let dir = KensakuConfig::config_dir();
     std::fs::create_dir_all(&dir)
@@ -94,16 +82,14 @@ pub fn acquire_writer_lock() -> Result<File, StartError> {
     }
 }
 
-/// Applies pending reset/rebuild markers and reclaims stale artifacts.
-///
-/// Must run before the config, database or index are opened: removing files
-/// that are still open would leave handles pointing at deleted inodes.
+/// Applies reset/rebuild markers and reclaims stale artifacts.
+/// Must run before anything is opened: deleting open files leaves dangling handles.
 pub fn prepare_data_dir() {
     crate::ops::stats::init_process_start();
     maybe_apply_pending_rebuild();
     maybe_apply_pending_reset();
 
-    // Best-effort: a failure here must never stop startup.
+    // Best-effort: never stop startup.
     let cleaned = maintenance::cleanup_stale_artifacts();
     if cleaned.bytes_reclaimed > 0 || !cleaned.errors.is_empty() {
         crate::say!(
@@ -117,10 +103,7 @@ pub fn prepare_data_dir() {
     }
 }
 
-/// Installs the process-wide extraction settings derived from `config`.
-///
-/// `IndexerManager::new` covers path modes, caps and extractors; OCR on/off,
-/// languages and engine are process globals that must be set here too.
+/// Installs process-global OCR settings (on/off, languages, engine) not covered by `IndexerManager::new`.
 pub fn apply_extraction_globals(config: &KensakuConfig) {
     crate::indexer::extract::set_ocr_enabled(config.ocr_enabled);
     crate::indexer::extract::image::set_ocr_max_image_bytes(config.ocr_max_image_bytes);
@@ -136,10 +119,7 @@ pub fn apply_extraction_globals(config: &KensakuConfig) {
     crate::indexer::extract::set_path_modes(&config.watched_dirs, &config.name_only_dirs);
 }
 
-/// Repairs missing OCR data in the background, only when OCR is enabled.
-///
-/// - Tesseract language data only when the binary exists but has none.
-/// - The selected PP-OCR/Indra pack only when it is missing.
+/// Repairs missing OCR data (Tesseract langs, selected pack) in the background when OCR is enabled.
 pub fn spawn_ocr_self_heal(config: &KensakuConfig) {
     if !config.ocr_enabled {
         return;
@@ -160,8 +140,7 @@ pub fn spawn_ocr_self_heal(config: &KensakuConfig) {
     }
 }
 
-/// Re-crawls when the OCR pack lands, and swaps in the semantic model when
-/// its files finish downloading.
+/// Re-crawls when the OCR pack lands; swaps in the semantic model when it finishes downloading.
 fn install_pack_hooks(indexer: &Arc<IndexerManager>) {
     {
         let manager = Arc::clone(indexer);
@@ -173,8 +152,7 @@ fn install_pack_hooks(indexer: &Arc<IndexerManager>) {
     }
 }
 
-/// Schedules a full wipe of Kensaku state, applied by the next index owner
-/// before it opens anything. Downloaded packs are kept unless `remove_packs`.
+/// Schedules a full wipe applied by the next index owner before it opens anything; packs kept unless `remove_packs`.
 pub fn request_reset(remove_packs: bool) -> Result<(), String> {
     let dir = KensakuConfig::config_dir();
     std::fs::create_dir_all(&dir)
@@ -192,22 +170,15 @@ fn reset_marker_path() -> std::path::PathBuf {
     reset_marker_path_in(&KensakuConfig::config_dir())
 }
 
-/// True when a reset was requested but not applied yet.
 pub fn reset_pending() -> bool {
     reset_marker_path().exists()
 }
 
-/// How many times a pending reset is retried, and how long between attempts.
-///
-/// A reset is only retried when deleting something failed. On a normal start
-/// there is no marker and none of this runs.
+/// Reset retry budget; only used when deleting something failed.
 const RESET_ATTEMPTS: u32 = 20;
 const RESET_RETRY: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// Runs `reset` until it succeeds or the attempt budget runs out.
-///
-/// Split out so the retry contract is testable without having to hold real
-/// files open. Returns the last error when every attempt failed.
+/// Runs `reset` until success or the budget runs out; returns the last error.
 fn reset_with_retries<F>(
     attempts: u32,
     delay: std::time::Duration,
@@ -231,28 +202,19 @@ where
     Err(last)
 }
 
-/// Applies a reset marker in `dir`. Returns true when a marker was found and
-/// the directory was cleared/recreated. Split from the startup path so the
-/// marker/restart contract has an automated test.
+/// Applies a reset marker in `dir`; true when one was found and applied.
 fn apply_pending_reset_in(dir: &std::path::Path) -> bool {
     let marker = reset_marker_path_in(dir);
     if !marker.exists() {
         return false;
     }
 
-    // Downloaded OCR and model packs survive a reset unless the user asked
-    // for them explicitly (see `ResetScope`). Wiping the whole directory used
-    // to throw away ~55 MB of downloads that are not the user's data, so
-    // "reset to fix a bad index" cost a re-download before search worked.
+    // Downloaded packs survive a reset unless explicitly requested (`ResetScope`).
     let scope = maintenance::ResetScope {
         remove_packs: reset_marker_removes_packs(dir),
     };
 
-    // The replacement process is spawned before the old one exits, so the
-    // previous process can still hold the index's memory maps when this runs.
-    // Windows refuses to delete a mapped file, which left the marker in place
-    // and made the app reset itself again on the next launch. Retry briefly:
-    // the old process is already exiting and releases everything in moments.
+    // The replacement process starts before the old one exits; Windows can't delete still-mapped files, so retry.
     let result = reset_with_retries(RESET_ATTEMPTS, RESET_RETRY, || {
         maintenance::apply_reset(dir, scope)
     });
@@ -292,22 +254,13 @@ fn apply_pending_reset_in(dir: &std::path::Path) -> bool {
     true
 }
 
-/// True when the reset marker asks for the downloaded packs to go as well.
-///
-/// The marker's contents carry the choice, so the decision is made by the UI
-/// that asked for the reset and applied by the fresh process before anything
-/// is open.
+/// True when the reset marker (`full`) asks for downloaded packs to go too.
 fn reset_marker_removes_packs(dir: &std::path::Path) -> bool {
     std::fs::read_to_string(reset_marker_path_in(dir))
         .map(|contents| contents.trim().eq_ignore_ascii_case("full"))
         .unwrap_or(false)
 }
 
-/// Clears Kensaku state when a reset was requested by `reset_all`.
-///
-/// Must run before `KensakuConfig::load()` and before `IndexerManager::new()`:
-/// removing the directory while the database or index is open would leave
-/// handles pointing at deleted inodes.
 fn rebuild_marker_path_in(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join(".rebuild-requested")
 }
@@ -369,7 +322,6 @@ mod tests {
         assert!(!reset_marker_path_in(&dir).exists());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
 
-        // A second call without a marker is a no-op.
         assert!(!apply_pending_reset_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -417,14 +369,12 @@ mod tests {
         std::fs::create_dir_all(dir.join("index")).unwrap();
         std::fs::write(dir.join("metadata.db"), b"stale").unwrap();
 
-        // Default reset: index and database go, downloaded packs stay.
         std::fs::write(reset_marker_path_in(&dir), b"keep-packs").unwrap();
         assert!(apply_pending_reset_in(&dir));
         assert!(dir.join("models/embed.onnx").exists());
         assert!(!dir.join("metadata.db").exists());
         assert!(!dir.join("index").exists());
 
-        // Explicit full reset: packs go too.
         std::fs::write(reset_marker_path_in(&dir), b"full").unwrap();
         assert!(apply_pending_reset_in(&dir));
         assert!(!dir.join("models").exists());

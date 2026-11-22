@@ -1,10 +1,5 @@
-//! Visual embedding storage and inference pipeline (K18 scaffolding).
-//!
-//! Provides `VisualStore` for holding 512-dimensional quantized i8 vectors
-//! per image node and image preprocessing (224x224 RGB with CLIP normalization).
-//! The deterministic mock encoder is test-only. Production builds return no
-//! encoder until a real ONNX vision/text pack is wired, so the visual tier stays
-//! disabled instead of surfacing fake results.
+//! Visual embedding store and CLIP-style preprocessing; no production encoder
+//! yet, so the visual tier stays disabled.
 
 use crate::embed::model::ModelRegistry;
 use image::{DynamicImage, imageops::FilterType};
@@ -17,7 +12,6 @@ pub const VISUAL_DIM: usize = 512;
 pub const MOCK_VISUAL_MODEL_ID: u32 = 100;
 pub const ONNX_VISUAL_MODEL_ID: u32 = 101;
 
-/// Standard CLIP image normalization constants.
 pub const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 pub const CLIP_STD: [f32; 3] = [0.26862954, 0.261_302_6, 0.275_777_1];
 
@@ -37,7 +31,6 @@ pub struct SimilarImageResult {
     pub modified: u64,
 }
 
-/// Contiguous in-memory store for image visual embeddings.
 #[derive(Debug, Clone)]
 pub struct VisualStore {
     pub units: Vec<VisualUnit>,
@@ -78,7 +71,7 @@ impl VisualStore {
         self.node_to_idx.clear();
     }
 
-    /// True if `node_id` is not present, or was embedded with a different model or dHash.
+    /// True if absent or embedded with a different model or dHash.
     pub fn needs_embedding(&self, node_id: u64, current_dhash: u64) -> bool {
         match self.node_to_idx.get(&node_id) {
             Some(&idx) => {
@@ -215,7 +208,7 @@ impl VisualStore {
     }
 }
 
-/// Preprocesses any dynamic image into 224x224 RGB planar float tensor [1, 3, 224, 224].
+/// Preprocesses to a [1, 3, 224, 224] planar CLIP-normalized tensor.
 pub fn preprocess_image(img: &DynamicImage) -> Vec<f32> {
     let resized = img.resize_exact(224, 224, FilterType::Triangle).to_rgb8();
     let num_pixels = 224 * 224;
@@ -225,7 +218,6 @@ pub fn preprocess_image(img: &DynamicImage) -> Vec<f32> {
         for x in 0..224 {
             let pixel = resized.get_pixel(x, y);
             let idx = (y * 224 + x) as usize;
-            // Planar format NCHW: R, then G, then B
             tensor[idx] = ((pixel[0] as f32 / 255.0) - CLIP_MEAN[0]) / CLIP_STD[0];
             tensor[num_pixels + idx] = ((pixel[1] as f32 / 255.0) - CLIP_MEAN[1]) / CLIP_STD[1];
             tensor[2 * num_pixels + idx] = ((pixel[2] as f32 / 255.0) - CLIP_MEAN[2]) / CLIP_STD[2];
@@ -235,7 +227,6 @@ pub fn preprocess_image(img: &DynamicImage) -> Vec<f32> {
     tensor
 }
 
-/// Abstract vision encoder trait.
 pub trait VisualEncoder: Send + Sync {
     fn model_id(&self) -> u32;
     fn dim(&self) -> usize;
@@ -247,7 +238,7 @@ pub trait VisualEncoder: Send + Sync {
     fn embed_text(&self, text: &str) -> Vec<i8>;
 }
 
-/// Deterministic mock vision encoder used when ONNX visual artifacts are absent.
+/// Deterministic mock encoder (tests only).
 #[derive(Debug, Clone, Default)]
 pub struct MockVisualEncoder;
 
@@ -264,7 +255,6 @@ impl VisualEncoder for MockVisualEncoder {
         let tensor = preprocess_image(img);
         let mut vec = vec![0.0f32; VISUAL_DIM];
 
-        // Project 224x224x3 into 512 dimensions using deterministic pseudo-random projection
         for (i, &val) in tensor.iter().enumerate() {
             let target_dim = (i * 31 + 17) % VISUAL_DIM;
             let sign = if (i * 13 + 7).is_multiple_of(2) {
@@ -275,7 +265,6 @@ impl VisualEncoder for MockVisualEncoder {
             vec[target_dim] += val * sign;
         }
 
-        // L2 normalize
         let norm_sq: f32 = vec.iter().map(|v| v * v).sum();
         if norm_sq > 0.0 {
             let norm = norm_sq.sqrt();
@@ -315,11 +304,7 @@ impl VisualEncoder for MockVisualEncoder {
     }
 }
 
-/// Returns the encoder used by the live indexer/search path.
-///
-/// The deterministic mock exists only for unit tests. There is no production
-/// ONNX visual encoder yet, so live builds return `None` and the visual tier is
-/// skipped rather than returning fake similarities from a hash projection.
+/// `None` until a real ONNX visual encoder exists (the mock is test-only).
 pub fn active_encoder() -> Option<&'static dyn VisualEncoder> {
     #[cfg(test)]
     {
@@ -328,18 +313,14 @@ pub fn active_encoder() -> Option<&'static dyn VisualEncoder> {
     }
     #[cfg(not(test))]
     {
-        // Beta model download is available in Settings, but search integration
-        // is intentionally not wired in this release.
         None
     }
 }
 
-/// True when a real visual encoder is available for indexing/search.
 pub fn visual_available() -> bool {
     active_encoder().is_some()
 }
 
-/// Checks `cancel_signal` during processing.
 pub fn is_cancelled(cancel_signal: Option<&AtomicBool>) -> bool {
     cancel_signal
         .map(|s| s.load(Ordering::Relaxed))
@@ -399,7 +380,6 @@ mod tests {
         let img = make_test_image(255, 100, 50);
         img.save(&thumb_path).unwrap();
 
-        // embed_image_from_thumbnail operates directly on the thumbnail file
         let vec = encoder.embed_image_from_thumbnail(&thumb_path);
         assert!(vec.is_some());
         assert_eq!(vec.unwrap().len(), VISUAL_DIM);
@@ -417,13 +397,10 @@ mod tests {
         assert!(store.needs_embedding(node_id, dhash));
         store.add_or_update(node_id, dhash, &vector);
 
-        // Same dhash and same model -> skip
         assert!(!store.needs_embedding(node_id, dhash));
 
-        // Changed dhash -> needs re-embedding
         assert!(store.needs_embedding(node_id, 0x99999999));
 
-        // Different model -> needs re-embedding
         store.model_id = MOCK_VISUAL_MODEL_ID + 1;
         assert!(store.needs_embedding(node_id, dhash));
     }
@@ -445,11 +422,9 @@ mod tests {
         let img_base = make_test_image(200, 100, 50);
         let vec_base = encoder.embed_image(&img_base);
 
-        // Near-duplicate: slight variation
         let img_near = make_test_image(200, 102, 50);
         let vec_near = encoder.embed_image(&img_near);
 
-        // Unrelated: inverted/different
         let img_diff = make_test_image(10, 20, 200);
         let vec_diff = encoder.embed_image(&img_diff);
 
@@ -457,13 +432,10 @@ mod tests {
         store.add_or_update(2, 0x2222, &vec_near);
         store.add_or_update(3, 0x3333, &vec_diff);
 
-        // 1. Querying with vec_base excluding self (node 1):
         let results = store.find_similar(&vec_base, Some(1), 0.30, 10);
 
-        // Self (node 1) must be excluded
         assert!(results.iter().all(|&(id, _)| id != 1));
 
-        // Near duplicate (node 2) should be ranked first with high similarity
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 2);
         assert!(
@@ -472,7 +444,6 @@ mod tests {
             results[0].1
         );
 
-        // If similarity floor is set high, unrelated image (node 3) must be dropped
         let strict_results = store.find_similar(&vec_base, Some(1), 0.80, 10);
         assert!(strict_results.iter().all(|&(id, _)| id != 3));
     }

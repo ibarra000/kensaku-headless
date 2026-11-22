@@ -1,10 +1,6 @@
 name: OCR (real models)
 
-# Runs PP-OCR for real (the actual model pack and ONNX Runtime) on every OS
-# Kensaku ships for. The normal CI only has unit tests, and that is how
-# PP-OCR shipped reading "Open settings" as "Opensettings" and scanned PDFs
-# shipped with no OCR at all. Scoped to OCR-related changes so ordinary PRs
-# don't pay for three extra Rust builds.
+# Real PP-OCR (model pack + ONNX Runtime) on every shipped OS; scoped to OCR changes.
 on:
   pull_request:
     paths:
@@ -19,8 +15,7 @@ on:
       - "crates/kensaku-core/tests/fixtures/ocr-ui-text/**"
       - ".github/workflows/ocr.yml"
   push:
-    # Post-merge verification: the real-model jobs are the only place a
-    # platform-specific OCR failure (like #174 on Fedora) can show up.
+    # Post-merge: only real-model jobs catch platform-specific OCR failures.
     branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
@@ -33,8 +28,7 @@ jobs:
   ocr:
     name: PP-OCR (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Long enough for a cold Rust build plus the model tests, short enough that a
-    # stalled download or build fails instead of hanging until the run timeout.
+    # Cold build + model tests; fail on stalls instead of hanging.
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -71,18 +65,14 @@ jobs:
           fetch https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/main/inference.onnx "$pack/det.onnx"
           fetch https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/main/inference.onnx "$pack/rec.onnx"
           fetch https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_tiny_dict.txt "$pack/dict.txt"
-          # Same checksums the app verifies (crates/kensaku-core/src/models.rs).
-          # Hash from stdin: on Windows, sha256sum prefixes the hash with "\"
-          # when the file path contains backslashes.
+          # Same checksums as crates/kensaku-core/src/models.rs. Hash via stdin: Windows sha256sum prefixes "\" for backslash paths.
           sum() { if command -v sha256sum >/dev/null; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d' ' -f1; }
           check() { [ "$(sum "$1")" = "$2" ] || { echo "checksum mismatch: $1"; exit 1; }; }
           check "$pack/det.onnx" 193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8
           check "$pack/rec.onnx" 9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6
           check "$pack/dict.txt" c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd
 
-          # Indra pack, same v1.1.0 artifacts and hashes as models.rs. The
-          # detector/recognizer split matters here: #174 was "Indra read
-          # nothing", which only a real pack can reproduce.
+          # Indra pack, same v1.1.0 artifacts and hashes as models.rs.
           indra="$RUNNER_TEMP/indra-pack"
           mkdir -p "$indra"
           base=https://huggingface.co/datalab-to/indra-ocr/resolve/v1.1.0
@@ -119,8 +109,7 @@ jobs:
           ocr::tests::real -- --include-ignored --test-threads=1 --nocapture
           --skip real_pack_reads_text
 
-      # Both engines in one process, which is where the ONNX Runtime session
-      # interaction between PP-OCR and Indra shows up.
+      # Both engines in one process exercises the shared ONNX Runtime session interaction.
       - name: Run the real-model Indra tests
         shell: bash
         run: >

@@ -2,8 +2,7 @@
 
 use super::imageops::LineBox;
 
-/// Reading order by recursive XY-cut (`order_post.order_xycut`): split at the
-/// widest whitespace gap on either axis, upper or left part first.
+/// Recursive XY-cut: split at the widest gap on either axis, upper/left first.
 pub fn reading_order(boxes: &[LineBox]) -> Vec<usize> {
     fn best_cut(boxes: &[LineBox], ids: &[usize], rows: bool) -> (f32, usize, Vec<usize>) {
         let span = |i: usize| {

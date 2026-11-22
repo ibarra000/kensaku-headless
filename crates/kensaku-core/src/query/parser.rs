@@ -44,7 +44,6 @@ pub fn parse_query(
     let mut is_first_token = true;
 
     for token in tokens {
-        // `near[x]` is an infix proximity operator, never a search term.
         if let Token::Word(text) = &token
             && let Some(distance) = parse_near_token(text)
         {
@@ -269,7 +268,6 @@ pub fn parse_query(
                             }
                         }
                         if !resolved_scope {
-                            // If trie could not resolve, match path as filter
                             let filter = Filter::Path(value.clone());
                             if negated {
                                 filters.push(Filter::Not(Box::new(filter)));
@@ -425,7 +423,7 @@ pub fn parse_query(
                         }
                     }
                     _ => {
-                        // Unknown key -> treat as literal text (never zero results)
+                        // Unknown key -> literal text (never zero results)
                         push_term!(Term {
                             text: raw_token,
                             field: TermField::Any,
@@ -552,16 +550,13 @@ fn parse_size_range(val: &str) -> Option<RangeOp> {
     Some(RangeOp::Between(size.saturating_sub(1024), size + 1024))
 }
 
-/// Maximum bound for a `near[x]` distance. Sloppier phrases beyond this are
-/// closer to "anywhere in the document" than "within N words"; clamping keeps
-/// phrase queries meaningful and matches the documented behavior.
+/// Clamp for `near[x]` distance.
 pub const NEAR_MAX_DISTANCE: u32 = 100;
 
 fn parse_near_token(text: &str) -> Option<u32> {
     let lower = text.to_ascii_lowercase();
     let rest = lower.strip_prefix("near")?;
     let rest = rest.trim();
-    // Only the canonical bracket form: near[5]
     let inner = rest.strip_prefix('[')?;
     let digits: String = inner.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
@@ -616,8 +611,7 @@ mod tests {
         }
     }
 
-    /// Synthetic tree rooted at the user's home directory so that `~/Projects`
-    /// resolves through the same code path as production.
+    /// Synthetic tree rooted at the user's home directory.
     fn fixture() -> Fixture {
         let projects = match dirs::home_dir() {
             Some(home) => home.join("Projects"),
@@ -921,9 +915,7 @@ mod tests {
         );
     }
 
-    /// #59: a quoted absolute path, typed raw or escaped the way the UI
-    /// inserts it, must resolve to the folder. On Windows the fixture paths
-    /// are real `C:\Users\...` paths, so this runs the reported case.
+    /// #59: a quoted absolute path, raw or escaped, resolves to the folder.
     #[test]
     fn resolves_quoted_absolute_path_with_native_separators() {
         let fixture = fixture();
@@ -953,7 +945,7 @@ mod tests {
         }
     }
 
-    /// Same case with a hard-coded Windows path, so Linux CI covers it too.
+    /// Hard-coded Windows path so Linux CI covers #59 too.
     #[test]
     fn resolves_quoted_windows_path_with_spaces() {
         let dir = PathBuf::from(r"C:\Users\me\My Docs");

@@ -19,18 +19,14 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-/// Handle to a running filesystem watcher thread.
-///
-/// Dropping the handle signals the thread to stop and waits for it to exit.
-/// This keeps repeated `start_indexing` calls from leaving duplicate watchers
-/// alive.
+/// Running watcher thread; dropping it stops and joins the thread.
 pub struct WatcherHandle {
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl WatcherHandle {
-    /// Signal the watcher to stop and wait for its thread to finish.
+    /// Signals the watcher to stop and joins its thread.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.thread.take() {
@@ -47,10 +43,7 @@ impl Drop for WatcherHandle {
 
 /// How long a path must be quiet before the watcher reads it.
 const SETTLE: Duration = Duration::from_millis(400);
-/// Overflow events can arrive in storms: on Linux an inotify queue overflow
-/// over a large or network-backed tree reports `need_rescan`, and the signal
-/// repeats while the tree keeps changing. A rescan walks every root, so
-/// coalesce them instead of starting one per event.
+/// Coalesces overflow rescans (inotify overflow repeats while the tree keeps changing).
 const RESCAN_COOLDOWN: Duration = Duration::from_secs(60);
 /// Extra observation for files whose mtime is still inside the retry window.
 const FRESH_RETRY: Duration = Duration::from_millis(500);
@@ -60,12 +53,9 @@ const FRESH_WINDOW: Duration = Duration::from_secs(10);
 struct PendingUpsert {
     deadline: Instant,
     first_seen: Instant,
-    /// `(size, mtime_secs)` from the previous settle attempt. A changing
-    /// fingerprint means the writer is still active, so keep waiting.
+    /// `(size, mtime_secs)` from the last attempt; a change means the writer is still active.
     fingerprint: Option<(u64, u64)>,
-    /// Walk everything below the path once it settles. Set for a directory
-    /// that arrives without child events (a rename on Windows/macOS, or a
-    /// folder moved into a watched root), never for ordinary metadata churn.
+    /// Walk the subtree once settled: a directory arrived without child events (rename/move-in).
     subtree: bool,
 }
 
@@ -91,9 +81,7 @@ impl PendingUpserts {
             });
     }
 
-    /// Drops a queued path, so a backend that reports the two halves of a
-    /// rename separately does not walk a subtree a second time once the
-    /// paired event has already repaired it.
+    /// Drops a queued path so a paired rename event doesn't trigger a second subtree walk.
     fn remove(&mut self, path: &Path) {
         self.paths.remove(path);
     }
@@ -128,8 +116,7 @@ fn modified_secs(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// Applies a settled path, re-queueing fresh files until their size and mtime
-/// stop moving (browser saves often create then keep writing).
+/// Applies a settled path, re-queueing fresh files until size and mtime stop moving.
 fn apply_settled(
     path: PathBuf,
     pending: PendingUpsert,
@@ -175,10 +162,7 @@ fn apply_settled(
     }
 
     if meta.is_dir() {
-        // Children of a moved/created directory are not reported by the
-        // platform, so a single-path upsert would leave them unindexed.
-        // Only paths queued as a subtree repair take this branch; ordinary
-        // directory metadata changes still just refresh the row.
+        // Platforms don't report children of moved/created dirs; only subtree repairs walk.
         if pending.subtree {
             let _ = reindex_subtree(path, cfg, metadata, content_index);
         } else {
@@ -237,10 +221,7 @@ fn run_watcher(
         }
     };
 
-    // Report live indexing only once a watch is actually registered. The flag
-    // used to be set before the loop, so an exhausted inotify limit, a
-    // network mount or a denied FSEvents subscription still looked healthy
-    // while nothing was being watched.
+    // Report live indexing only once a watch is actually registered.
     let mut registered = 0usize;
     for root in &watched_dirs {
         if !root.exists() {
@@ -276,8 +257,7 @@ fn run_watcher(
         let cfg = config.read().clone();
         let now = Instant::now();
 
-        // Apply paths that have been quiet for the settle window. Pausing only
-        // gates reads/indexing; removes and renames are still applied below.
+        // Apply quiet paths. Pausing only gates reads; removes and renames still apply.
         if !cfg.pause_indexing {
             for (path, entry) in pending.due(now) {
                 apply_settled(
@@ -293,8 +273,7 @@ fn run_watcher(
             }
         }
 
-        // Drain all available events in a batch (coalescing) instead of
-        // one-at-a-time. Read config once per batch, not per event.
+        // Drain events in a batch; read config once per batch.
         let mut batch_count = 0;
         loop {
             match rx.try_recv() {
@@ -325,7 +304,6 @@ fn run_watcher(
                     crate::say_err!("[Kensaku Watcher] Error event: {:?}", e);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // No more events; fall through to commit check
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -334,8 +312,7 @@ fn run_watcher(
             }
         }
 
-        // If no events were drained, wait until the next settle deadline (or a
-        // short timeout so pause/unpause and shutdown stay responsive).
+        // Nothing drained: wait for the next settle deadline (short, to stay responsive).
         if batch_count == 0 {
             let wait = if cfg.pause_indexing {
                 Duration::from_millis(500)
@@ -376,7 +353,6 @@ fn run_watcher(
             }
         }
 
-        // Periodic Tantivy commit if needed
         if pending_commits > 0
             && let Ok(elapsed) = last_commit.elapsed()
             && (elapsed >= Duration::from_secs(3)
@@ -399,13 +375,11 @@ fn run_watcher(
     }
 }
 
-/// True when another overflow rescan is allowed at `now`.
 fn rescan_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|last| now.saturating_duration_since(last) >= RESCAN_COOLDOWN)
 }
 
-/// Starts an overflow rescan when the cooldown allows it and nothing is
-/// already running. Returns whether a rescan was actually started.
+/// Starts an overflow rescan if the cooldown allows and none is running; returns whether it started.
 fn maybe_spawn_rescan(
     need_rescan: bool,
     last_rescan: &mut Option<Instant>,
@@ -424,10 +398,7 @@ fn maybe_spawn_rescan(
     }
 }
 
-/// Reconciles the whole watched tree after a platform overflow/rescan signal.
-///
-/// Returns `false` when a rescan is already in flight; the running pass is
-/// walking the same tree, so overlapping is never useful.
+/// Reconciles the watched tree after an overflow; `false` if a rescan is already in flight.
 fn spawn_rescan(
     watched_dirs: &[PathBuf],
     cfg: &KensakuConfig,
@@ -476,12 +447,7 @@ fn rescan_watched_dirs(
         if is_path_excluded(&entry.path, cfg) {
             continue;
         }
-        // A rescan exists to reconcile paths the watcher may have missed, not
-        // to re-read the tree. Skipping unchanged entries is what keeps an
-        // overflow storm from turning into a full-corpus re-index (large
-        // corpora on mounted drives overflow inotify regularly). Pending
-        // entries are still retried, and a changed file always differs in at
-        // least one of mtime/size.
+        // Skip unchanged entries so overflow storms don't become full re-indexes.
         let unchanged = metadata
             .read()
             .get(&entry.path)
@@ -493,8 +459,7 @@ fn rescan_watched_dirs(
         changed += 1;
     }
 
-    // Only roots that can be read can prove a path is gone; unmounted drives
-    // keep their metadata.
+    // Only readable roots can prove a path is gone; unmounted drives keep their metadata.
     let available: Vec<&PathBuf> = watched_dirs
         .iter()
         .filter(|root| std::fs::read_dir(root).is_ok())
@@ -524,23 +489,15 @@ fn rescan_watched_dirs(
 }
 
 fn is_path_excluded(path: &Path, cfg: &KensakuConfig) -> bool {
-    // Kensaku's own runtime data (index, SQLite WAL, thumbnails, OCR packs)
-    // lives under `config_dir()` and is written while the watcher runs. On
-    // macOS that path is not hidden, so every write would otherwise be
-    // re-indexed through these very events. Pruned by path, matching the
-    // crawler's `runtime_dir_prunes`.
+    // Ignore Kensaku's own runtime data (not hidden on macOS); matches `runtime_dir_prunes`.
     if starts_with_any(path, &prunes_for_roots(&cfg.watched_dirs)) {
         return true;
     }
-    // Honour the ignore files the crawler used, so the watcher and the crawl
-    // agree about what belongs in the index.
+    // Honour the crawler's ignore files.
     if crate::indexer::ignore::is_active_ignored(path, path.is_dir()) {
         return true;
     }
-    // The crawl drops excluded extensions and sensitive names before adding
-    // anything. The watcher used to skip both checks, so saving an excluded
-    // or secret-bearing file put it straight back into the index until the
-    // next full crawl.
+    // Match the crawl: drop excluded extensions and sensitive names.
     if !path.is_dir() && cfg.is_extension_excluded(path) {
         return true;
     }
@@ -559,7 +516,7 @@ fn is_path_excluded(path: &Path, cfg: &KensakuConfig) -> bool {
     })
 }
 
-/// Applies a single watcher event, returning how many index mutations occurred.
+/// Applies one watcher event, returning the number of index mutations.
 fn handle_event(
     event: &Event,
     cfg: &KensakuConfig,
@@ -580,27 +537,19 @@ fn handle_event(
                 let new_excluded = is_path_excluded(new_path, cfg);
 
                 if new_path.is_dir() {
-                    // Moving a directory does not produce per-child events, so
-                    // the whole subtree has to be translated to the new prefix
-                    // (and its content re-indexed) instead of being dropped.
+                    // Directory moves have no per-child events: translate the subtree.
                     if !new_excluded {
                         handle_directory_rename(old_path, new_path, cfg, metadata, content_index);
-                        // Linux reports `To` before the paired `Both`, which
-                        // queued a subtree walk for this path. The rename
-                        // already re-indexed it; do not walk it twice.
+                        // Linux reports `To` before `Both`; the rename already re-indexed it.
                         pending.remove(new_path);
                         changes += 1;
                     } else {
-                        // Moved into an excluded location: drop the subtree.
-                        // Removal runs even when the old path is excluded too,
-                        // so tightening the policy cleans up stale rows.
+                        // Moved into an excluded location: drop the subtree, even if the old path was excluded.
                         handle_path_remove(old_path, metadata, content_index);
                         changes += 1;
                     }
                 } else {
-                    // Drop the old row unconditionally: an excluded old path
-                    // may still have stale metadata from before the policy
-                    // changed.
+                    // Always drop the old row: an excluded path may hold stale metadata.
                     handle_path_remove(old_path, metadata, content_index);
                     changes += 1;
                     if !new_excluded {
@@ -611,9 +560,7 @@ fn handle_event(
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-            // Removes are safe during a pause: they only drop stale rows.
-            // Apply them even for excluded paths so a tightened policy can
-            // clean up rows written before the change.
+            // Removes are safe during pause and apply to excluded paths so tightened policy cleans up.
             for path in &event.paths {
                 handle_path_remove(path, metadata, content_index);
                 changes += 1;
@@ -622,31 +569,26 @@ fn handle_event(
         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
             for path in &event.paths {
                 if !is_path_excluded(path, cfg) {
-                    // Windows reports a folder rename as `From` then `To`,
-                    // with no paired event and no events for the children.
-                    // Queue the subtree, not just the directory row (#187).
+                    // Windows: folder rename is `From` then `To` with no child events (#187).
                     pending.note(path.clone(), now, path.is_dir());
                     changes += 1;
                 }
             }
         }
         EventKind::Modify(ModifyKind::Name(_)) => {
-            // Rename direction unknown: reconcile using the current filesystem state.
+            // Rename direction unknown: reconcile from current filesystem state.
             for path in &event.paths {
                 if !path.exists() || is_path_excluded(path, cfg) {
                     handle_path_remove(path, metadata, content_index);
                 } else {
-                    // macOS/FSEvents cannot pair the two sides of a rename,
-                    // so a directory that appears here still needs its
-                    // children re-indexed (#187).
+                    // FSEvents can't pair rename sides; the directory still needs its children (#187).
                     pending.note(path.clone(), now, path.is_dir());
                 }
                 changes += 1;
             }
         }
         EventKind::Remove(_) => {
-            // Always remove, even for excluded paths: that is how a policy
-            // change (or a file that became sensitive) drops stale rows.
+            // Always remove, even excluded paths, so policy changes drop stale rows.
             for path in &event.paths {
                 handle_path_remove(path, metadata, content_index);
                 changes += 1;
@@ -655,8 +597,7 @@ fn handle_event(
         EventKind::Create(_) => {
             for path in &event.paths {
                 if !is_path_excluded(path, cfg) {
-                    // A folder moved into a watched root is reported as a
-                    // create with no events for its contents.
+                    // A folder moved into a root arrives as a create with no child events.
                     pending.note(path.clone(), now, path.is_dir());
                     changes += 1;
                 }
@@ -665,8 +606,7 @@ fn handle_event(
         EventKind::Modify(_) => {
             for path in &event.paths {
                 if !is_path_excluded(path, cfg) {
-                    // Ordinary metadata/content churn: a directory here is
-                    // not a move, so do not walk its whole subtree.
+                    // Ordinary churn: don't walk the subtree.
                     pending.note(path.clone(), now, false);
                     changes += 1;
                 }
@@ -678,9 +618,7 @@ fn handle_event(
     changes
 }
 
-/// Recomputes screenshot-burst membership for one image after its perceptual
-/// hash and extracted text are known. Grouping is best-effort and never blocks
-/// indexing.
+/// Recomputes screenshot-burst membership for one image (best-effort).
 fn assign_image_burst(path: &Path, content: Option<&str>, metadata: &Arc<RwLock<MetadataStore>>) {
     let Some(db) = metadata.read().db() else {
         return;
@@ -701,12 +639,7 @@ fn assign_image_burst(path: &Path, content: Option<&str>, metadata: &Arc<RwLock<
     }
 }
 
-/// Applies a directory rename that the watcher reported as a single event.
-///
-/// Rewrites the stored subtree under the metadata write lock (one database
-/// transaction), drops the content documents that belonged to the old paths,
-/// and then walks the new directory in a short-lived thread to restore content
-/// without waiting for a restart.
+/// Applies a single-event directory rename: rewrites the subtree in one transaction, then re-walks it off-thread.
 fn handle_directory_rename(
     old_path: &Path,
     new_path: &Path,
@@ -716,8 +649,7 @@ fn handle_directory_rename(
 ) {
     let old_paths = metadata.write().rename_prefix(old_path, new_path);
 
-    // The old path terms no longer match anything; the repair walk re-adds
-    // fresh documents under the new paths.
+    // Old path terms match nothing; the repair walk re-adds them under new paths.
     if let Some(c_index) = content_index.read().as_ref() {
         for path in &old_paths {
             let _ = c_index.remove(path);
@@ -728,12 +660,7 @@ fn handle_directory_rename(
     let _ = reindex_subtree(new_path.to_path_buf(), cfg, metadata, content_index);
 }
 
-/// Re-adds every path below `dir` to metadata and the content index.
-///
-/// A directory that moves carries no events for its children: `notify` walks
-/// the tree for a paired rename (`RenameMode::Both`), but Windows emits
-/// `From`/`To` separately and macOS/FSEvents has no pairing at all, so the
-/// only way to keep the subtree searchable is to walk it explicitly (#187).
+/// Re-adds every path below `dir`; directory moves carry no child events on Windows/macOS (#187).
 fn reindex_subtree(
     dir: PathBuf,
     cfg: &KensakuConfig,
@@ -747,8 +674,7 @@ fn reindex_subtree(
     let metadata = Arc::clone(metadata);
     let content_index = Arc::clone(content_index);
 
-    // A large directory move can take a while; re-index it off the watcher
-    // thread so event draining is not blocked.
+    // Off the watcher thread so event draining isn't blocked.
     thread::spawn(move || {
         let entries = walk_directories(
             std::slice::from_ref(&dir),
@@ -759,8 +685,7 @@ fn reindex_subtree(
         let mut pending_commits = 0usize;
 
         for entry in entries {
-            // The crawl drops excluded extensions before touching metadata;
-            // a rename must do the same or moving a folder re-adds them.
+            // Like the crawl, skip excluded extensions.
             if !entry.is_dir
                 && entry.extension.is_some_and(|extension| {
                     excluded_extensions.iter().any(|excluded| {
@@ -812,8 +737,7 @@ fn reindex_subtree(
                 metadata.write().clear_burst_for_path(&path);
             }
 
-            // Cloud placeholders keep metadata only: reading them would
-            // download the file.
+            // Cloud placeholders keep metadata only: reading downloads them.
             if !is_indexable || is_cloud_placeholder_path(&path) {
                 continue;
             }
@@ -848,8 +772,7 @@ fn handle_file_upsert(
     metadata: &Arc<RwLock<MetadataStore>>,
     content_index: &Arc<RwLock<Option<ContentIndex>>>,
 ) {
-    // Skip entries whose parent directory is already gone: creating them would
-    // leave orphan rows behind after a directory removal.
+    // Skip entries whose parent is gone, or they become orphan rows.
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && !parent.exists()
@@ -901,9 +824,7 @@ fn handle_file_upsert(
 
     metadata.write().add(entry);
 
-    // Image dimensions and perceptual hash are best-effort so duplicate
-    // detection stays fresh for changed files. Thumbnails remain lazy and are
-    // only generated by the `get_thumbnail` command.
+    // Dimensions and phash are best-effort; thumbnails stay lazy.
     let is_image = extension
         .as_deref()
         .is_some_and(image_util::is_supported_image_extension);
@@ -939,9 +860,7 @@ fn handle_file_upsert(
             || crate::indexer::extract::external::handles(path))
         && !is_cloud_placeholder(&meta)
     {
-        // Match the crawl's configured cap. A hard-coded 100 KB truncated the
-        // first save of any larger file, and the content index kept that
-        // truncated document until the next full crawl.
+        // Match the crawl's configured content cap.
         read_text_content(
             path,
             crate::indexer::extract::content_max_text_bytes() as u64,
@@ -967,10 +886,7 @@ fn handle_file_upsert(
     }
 }
 
-/// Removes a path from metadata and the content index.
-///
-/// When the path was a directory, every indexed descendant is removed as well,
-/// since the filesystem no longer reports individual removals for all children.
+/// Removes a path (and, for a directory, every indexed descendant) from metadata and content.
 fn handle_path_remove(
     path: &Path,
     metadata: &Arc<RwLock<MetadataStore>>,
@@ -1142,9 +1058,7 @@ mod tests {
         let dir = temp_dir("settle");
         let file = dir.join("note.txt");
         std::fs::write(&file, "hello").unwrap();
-        // Watch the temp root explicitly: on Windows the default watched root
-        // (home) prunes `~\AppData`, which contains this test's temp directory
-        // and would exclude every event here.
+        // Watch the temp root: on Windows the default root prunes `~\AppData`, which holds it.
         let cfg = KensakuConfig {
             watched_dirs: vec![dir.clone()],
             ..KensakuConfig::default()
@@ -1171,8 +1085,7 @@ mod tests {
         let dir = temp_dir("fresh");
         let file = dir.join("download.part");
         std::fs::write(&file, "partial").unwrap();
-        // See `create_event_waits_for_settle_before_indexing`: watch the temp
-        // root so Windows' under-AppData prune does not swallow every event.
+        // See `create_event_waits_for_settle_before_indexing`.
         let cfg = KensakuConfig {
             watched_dirs: vec![dir.clone()],
             ..KensakuConfig::default()
@@ -1289,17 +1202,13 @@ mod tests {
 
     #[test]
     fn writes_inside_kensakus_runtime_dir_are_never_indexed() {
-        // On macOS the config dir (index, SQLite WAL, thumbnails, OCR packs)
-        // is not a hidden path; the watcher must ignore every event from it
-        // just like the crawler does (`runtime_dir_prunes`).
+        // The watcher must ignore the (non-hidden on macOS) config dir, like `runtime_dir_prunes`.
         let runtime_dir = crate::indexer::walker::runtime_dir_prunes()
             .pop()
             .expect("there is always at least one prune root");
         let marker = runtime_dir.join("index-wal.txt");
 
-        // The event target lives in the real runtime dir, but the test's
-        // backing stores are scratch directories — the prune decision is made
-        // purely from the path before any store is touched.
+        // The prune is decided from the path alone, before any store is touched.
         let tmp = temp_dir("runtime-prune");
         let cfg = KensakuConfig::default();
         let metadata = store(&tmp);
@@ -1375,8 +1284,7 @@ mod tests {
         };
         let metadata = store(&data);
         let content_index = no_content();
-        // Only the old directory is known. Its hidden descendant must be
-        // discovered by the asynchronous repair walk, not a prefix rewrite.
+        // Only the old dir is known; the hidden descendant must come from the repair walk.
         handle_file_upsert(&old, &metadata, &content_index);
         std::fs::rename(&old, &new).unwrap();
         handle_directory_rename(&old, &new, &cfg, &metadata, &content_index);
@@ -1390,8 +1298,7 @@ mod tests {
             "repair lost hidden descendant"
         );
         assert!(metadata.read().get(&old).is_none());
-        // The worker owns cloned stores until it finishes; leave scratch
-        // cleanup to the OS rather than race its final transaction flush.
+        // The worker owns cloned stores; leave cleanup to the OS to avoid racing its flush.
     }
 
     #[test]
@@ -1434,8 +1341,7 @@ mod tests {
     #[test]
     fn unchanged_rescan_does_not_reindex_the_tree() {
         let root = temp_dir("rescan-unchanged");
-        // Keep the SQLite database outside the watched root: writes to it
-        // would otherwise change the root's own mtime and make this flaky.
+        // Store outside the watched root, or its writes change the root mtime.
         let data = temp_dir("rescan-unchanged-store");
         std::fs::write(root.join("stable.txt"), "stable").unwrap();
         let cfg = KensakuConfig {
@@ -1456,8 +1362,7 @@ mod tests {
         assert_eq!(metadata.read().len(), entries);
     }
 
-    /// Polls until a background re-index has finished, so the assertion does
-    /// not race the repair thread.
+    /// Polls until `done` holds, so assertions don't race the repair thread.
     fn wait_until(mut done: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -1476,8 +1381,7 @@ mod tests {
     #[test]
     fn windows_shaped_directory_rename_reindexes_its_children() {
         let root = temp_dir("rename-windows");
-        // Keep the database outside the watched root: writing to it would
-        // generate events for the tree under test.
+        // Store outside the watched root so it generates no events.
         let data = temp_dir("rename-windows-store");
         let old = root.join("2026-13-11");
         let new = root.join("2026-11-13");
@@ -1499,8 +1403,7 @@ mod tests {
         let mut queue = PendingUpserts::default();
         let now = Instant::now();
 
-        // Windows reports a rename as two independent events, with no events
-        // for the children and no paired `Both` (#187).
+        // Windows: two independent rename events, no child events, no `Both` (#187).
         handle_event(
             &event(
                 EventKind::Modify(ModifyKind::Name(RenameMode::From)),

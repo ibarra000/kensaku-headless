@@ -1,17 +1,12 @@
-//! Screenshot burst grouping.
-//!
-//! Bursts are deliberately conservative: an image joins an earlier burst only
-//! when its perceptual hash and its text lines both look like the same page
-//! (possibly scrolled), and only inside a short capture window in the same
-//! directory. Distinct pages that share a sidebar must not collapse into one.
+//! Screenshot burst grouping: conservative so distinct pages sharing a sidebar
+//! never collapse into one burst.
 
 use std::collections::HashSet;
 
 /// Images further apart than this are never considered part of one burst.
 pub const BURST_WINDOW_SECS: u64 = 10 * 60;
 
-/// Number of line hashes kept per image. Bottom-k sampling makes the signature
-/// independent of line order and bounded for very long OCR output.
+/// Line hashes kept per image (bottom-k: order-independent and bounded).
 pub const MAX_SIGNATURE_LINES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,10 +24,7 @@ impl TextOverlap {
     }
 }
 
-/// Hashes normalized non-empty lines into a compact, sorted bottom-k signature.
-///
-/// Short labels such as sidebar items are kept: dropping them would make it
-/// harder to tell a scrolled page from a different page with the same chrome.
+/// Hashes normalized non-empty lines into a sorted bottom-k signature; short labels are kept.
 pub fn line_signature(text: &str) -> Vec<u8> {
     let mut hashes: Vec<u64> = text
         .lines()
@@ -85,7 +77,6 @@ fn decode_signature(bytes: &[u8]) -> Vec<u64> {
         .collect()
 }
 
-/// Computes line-set overlap between two stored signatures.
 pub fn text_overlap(a: &[u8], b: &[u8]) -> TextOverlap {
     let a = decode_signature(a);
     let b = decode_signature(b);
@@ -108,12 +99,7 @@ pub fn text_overlap(a: &[u8], b: &[u8]) -> TextOverlap {
     }
 }
 
-/// Decides whether a pair belongs to the same screenshot burst.
-///
-/// * Strong line overlap plus a close visual match (`<= 10` bits) is a burst.
-/// * A farther visual match (`<= 32` bits) is allowed only when at least five
-///   lines overlap strongly enough to explain scrolling.
-/// * With too little text to compare, only a very close visual match counts.
+/// Same burst: strong line overlap plus close visual (<=10 bits), or farther (<=32) with >=5 overlapping lines.
 pub fn is_same_burst(visual_distance: u32, text: TextOverlap) -> bool {
     let text_match = text.usable() && text.shared >= 3 && text.dice >= 0.70;
     if text_match && visual_distance <= 10 {
@@ -191,8 +177,6 @@ mod tests {
             },
         ];
 
-        // Keep the literal in the fixture so it is obvious what the shared
-        // chrome is even if the cases above evolve.
         assert!(sidebar.contains("Settings"));
 
         for case in cases {

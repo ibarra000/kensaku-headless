@@ -1,10 +1,5 @@
-//! Extraction/indexing throughput harness.
-//!
+//! Parallel extraction throughput over `<dir>` without touching the real index.
 //! Usage: `cargo run --release --example index_bench -- <dir> [max_files]`
-//!
-//! Walks `<dir>`, then runs the same extraction path the indexer uses (image
-//! metadata + text/OCR) in parallel, reporting wall time and throughput. This
-//! isolates the slow part of a crawl without touching the real index.
 
 use kensaku_core::indexer::content::{
     is_indexable_extension, is_indexable_file_name, read_text_content,

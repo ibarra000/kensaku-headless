@@ -1,8 +1,5 @@
-//! Optional ONNX smart embedding pack using `ort`.
-//!
-//! Provides a transformer-based text embedder (e.g., `bge-small-en-v1.5` int8)
-//! behind the `smart-embeddings` Cargo feature. When the feature is disabled
-//! or model files are missing, callers cleanly fall back to `StaticTable`.
+//! Optional ONNX text embedder (`smart-embeddings` feature); callers fall back
+//! to `StaticTable` when disabled or missing.
 
 use std::path::Path;
 
@@ -89,7 +86,7 @@ impl SmartEmbedder {
                 *env = Some(ort::init().build().ok()?);
             }
             let builder = ort::session::Session::builder(env.as_ref().unwrap()).ok()?;
-            // Bound intra-op threads to 1 to stay within background budget
+            // One intra-op thread to stay within the background budget.
             let mut builder = builder.with_intra_threads(1).ok()?;
             builder.commit_from_file(&model_path).ok()?
         };
@@ -206,13 +203,10 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    // These tests exercise the stub that is compiled when the `smart-embeddings`
-    // feature is OFF (the default in `cargo test`). The stub must never panic
-    // and must return sentinels that callers can detect.
+    // Tests for the stub compiled without `smart-embeddings`.
 
     #[test]
     fn load_always_returns_none_without_feature() {
-        // A non-existent directory is fine — the stub returns None regardless.
         let result = SmartEmbedder::load(Path::new("/tmp/no-such-model-dir"));
         assert!(
             result.is_none(),
@@ -222,8 +216,6 @@ mod tests {
 
     #[test]
     fn embed_returns_empty_without_feature() {
-        // We can only call embed on a value we construct. With the feature off
-        // SmartEmbedder is a unit struct, so just build one directly.
         let e = SmartEmbedder;
         assert!(e.embed("hello world").is_empty());
     }

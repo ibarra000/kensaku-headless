@@ -3,14 +3,14 @@
 use super::{ApiError, Kensaku};
 use serde_json::Value;
 
-/// Talks to the daemon for the current data directory over local IPC.
+/// Daemon client for the current data directory.
 #[derive(Debug, Clone, Copy)]
 pub struct Client {
     _private: (),
 }
 
 impl Client {
-    /// Connects to a running daemon, starting one first when none answers.
+    /// Connects, starting a daemon first if none answers.
     pub fn connect() -> Result<Self, ApiError> {
         crate::daemon::ensure_running()?;
         Ok(Self { _private: () })

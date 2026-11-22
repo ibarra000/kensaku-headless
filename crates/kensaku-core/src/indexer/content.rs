@@ -16,8 +16,7 @@ use tantivy::schema::*;
 use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
-/// Converts a size predicate into Tantivy term bounds over the `size` fast
-/// field.
+/// Converts a size predicate into Tantivy term bounds on the `size` fast field.
 fn size_range_terms(field: Field, range: RangeOp) -> (Bound<Term>, Bound<Term>) {
     match range {
         RangeOp::Lt(value) => (
@@ -43,11 +42,7 @@ fn size_range_terms(field: Field, range: RangeOp) -> (Bound<Term>, Bound<Term>) 
     }
 }
 
-/// Canonicalizes OCR/lookalike characters for the folded trigram tier.
-///
-/// Spaces and punctuation are preserved, so folding never joins two words.
-/// The mapping is intentionally lossy in one direction: `rn → m`, `vv → w`,
-/// and `cl → d` make the longer spelling match the shorter query.
+/// Canonicalizes OCR lookalikes for the folded trigram tier (`rn→m`, `vv→w`, `cl→d`); never joins words.
 pub fn fold(text: &str) -> String {
     let lower = text.to_lowercase();
     let chars: Vec<char> = lower.chars().collect();
@@ -81,11 +76,7 @@ pub fn fold(text: &str) -> String {
     out
 }
 
-/// Verifies a folded candidate against the original text.
-///
-/// Every query term of three or more characters must occur exactly, or within
-/// the OCR budget: one misread for 4–7 characters, two for 8+. Shorter terms
-/// must match exactly.
+/// Verifies a folded candidate: terms of 3+ chars may have 1 misread (4–7 chars) or 2 (8+).
 pub fn verify_folded(raw: &str, query: &str) -> bool {
     let lower = raw.to_lowercase();
     let terms: Vec<&str> = query
@@ -110,8 +101,7 @@ fn term_matches(raw_lower: &str, term: &str) -> bool {
         _ => 0,
     };
     if budget == 0 {
-        // The two-character to one-character folds are exact mappings, so a
-        // one-character folded term still has to match a whole folded word.
+        // Two-to-one folds are exact, so a one-char folded term must match a whole folded word.
         return raw_lower
             .split(|ch: char| !ch.is_alphanumeric())
             .filter(|word| !word.is_empty())
@@ -154,7 +144,6 @@ fn edit_distance_within(needle: &[char], haystack: &str, budget: usize) -> bool 
     previous[hay.len()] <= budget
 }
 
-/// Returns true when `text` contains a `near[x]` proximity operator.
 pub fn contains_near(text: &str) -> bool {
     text.split_whitespace().any(parse_near_distance_opt)
 }
@@ -179,13 +168,7 @@ fn parse_near_distance(tok: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Rewrites `a near[n] b` (and chains) into a Tantivy phrase query with slop:
-/// `"a b"~n`. Other tokens are sanitized as usual.
-///
-/// A `near[d]` operator is never emitted as a term: when it cannot bind a term
-/// on both sides (leading, trailing typo, doubled `a near[2] near[3] b`, where
-/// the last distance wins to match the parser) it is dropped, mirroring the
-/// query parser which never pushes it into the term list.
+/// Rewrites `a near[n] b` chains into `"a b"~n`; unbindable `near[d]` operators are dropped.
 pub fn rewrite_near_in_group(input: &str) -> String {
     let tokens: Vec<&str> = input.split_whitespace().collect();
     let mut out: Vec<String> = Vec::new();
@@ -195,9 +178,7 @@ pub fn rewrite_near_in_group(input: &str) -> String {
             i += 1;
             continue;
         }
-        // Accumulate `<term> (near[d] <term>)*` into one phrase. Sanitized
-        // tokens are trimmed: characters like `+` or `*` sanitize down to
-        // spaces inside a single word.
+        // Sanitized tokens are trimmed: `+`/`*` sanitize to spaces inside one word.
         let mut terms: Vec<String> = Vec::new();
         {
             let cleaned = sanitize_query_text(tokens[i]).trim().to_string();
@@ -209,7 +190,7 @@ pub fn rewrite_near_in_group(input: &str) -> String {
         let mut bound = false;
         let mut j = i + 1;
         loop {
-            // Scan a run of operators; only the last distance in a run binds.
+            // Only the last distance in an operator run binds.
             let mut last_op: Option<u32> = None;
             while j < tokens.len()
                 && let Some(d) = parse_near_distance(tokens[j])
@@ -287,27 +268,22 @@ impl SnippetCache {
 pub struct ContentIndex {
     index: Index,
     reader: IndexReader,
-    /// `None` for read-only handles (CLI/MCP): Tantivy takes an exclusive lock
-    /// while a writer exists, so a second process can only open the reader.
+    /// `None` for read-only handles: Tantivy's writer lock is exclusive across processes.
     writer: Option<Arc<RwLock<IndexWriter>>>,
     pub path_field: Field,
     pub filename_field: Field,
     pub content_field: Field,
-    /// Folded text indexed with a 3-gram tokenizer. `None` for a read-only
-    /// handle opened on the pre-K5 schema.
+    /// Folded 3-gram text; `None` on a read-only pre-K5 handle.
     pub content_folded_field: Option<Field>,
-    /// Original text used to verify folded candidates. Stored but not indexed.
+    /// Original text for verifying folded candidates (stored, not indexed).
     pub content_raw_field: Option<Field>,
     pub modified_field: Field,
-    /// Exact extension (lowercase) for filter pushdown. `None` on a legacy
-    /// read-only handle.
+    /// Lowercase extension for filter pushdown; `None` on a legacy handle.
     pub ext_field: Option<Field>,
-    /// File size in bytes for range pushdown. `None` on a legacy handle.
+    /// Byte size for range pushdown; `None` on a legacy handle.
     pub size_field: Option<Field>,
-    /// True when this construction migrated an older schema and the caller
-    /// must force a full content re-extraction.
+    /// Set when an older schema was migrated; caller must re-extract all content.
     pub rebuilt: bool,
-    /// Reason recorded when an index was rebuilt during migration.
     pub rebuild_reason: Option<String>,
     snippet_cache: Mutex<SnippetCache>,
 }
@@ -321,22 +297,14 @@ pub struct ContentMatch {
     pub modified: u64,
 }
 
-/// Which text field a BM25 group should be scoped to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
-    /// Search both `filename` and `content`.
     Any,
-    /// Search only `filename`.
     Name,
-    /// Search only `content`.
     Content,
 }
 
-/// Filters pushed into the Tantivy query before top-k collection.
-///
-/// Only positive clauses are represented. Type/lang/name/path and negations
-/// remain metadata post-filters; pushing a positive ext/size is always safe
-/// because every surviving result must satisfy it too.
+/// Positive ext/size filters pushed into the Tantivy query (safe: every result must satisfy them).
 #[derive(Debug, Clone, Default)]
 pub struct ContentFilters {
     pub ext: Option<String>,
@@ -349,32 +317,18 @@ impl ContentFilters {
     }
 }
 
-/// Result of a grouped BM25 search that may also include regex clauses.
 #[derive(Debug, Clone, Default)]
 pub struct ContentSearchOutcome {
     pub matches: Vec<ContentMatch>,
-    /// Actionable messages for ignored/invalid regex patterns.
     pub hints: Vec<String>,
 }
 
-/// Upper bound on user-supplied regex patterns to avoid pathological cases.
 pub const MAX_REGEX_PATTERN_LEN: usize = 1024;
 
-/// Version marker for the content index schema.
-/// v1: K5 schema (content_folded + content_raw)
-/// v2: K15 schema (CJK-aware "kensaku" tokenizer on filename and content)
-/// v3: ext/size fields for filter pushdown (K12/B4)
-/// v4: trigram field stores term frequencies only, not positions (#129).
-///     Nothing queries positions: folded search builds boolean term queries,
-///     and no phrase query exists. Positions were roughly the largest single
-///     contributor to index size per file.
+/// Content index schema version. v4: trigram field stores frequencies only, no positions.
 pub const CONTENT_SCHEMA_VERSION: u32 = 4;
 
-/// Records the schema version the schema version this index was written with.
-///
-/// This used to swallow its error. A failed write leaves the marker at version
-/// 0, so the next launch reads a stale schema, rebuilds the whole index, and
-/// re-extracts every file on every single start, silently.
+/// Writes the schema marker; a silent failure would force a full rebuild on every launch.
 fn write_schema_marker(path: &std::path::Path) {
     if let Err(error) = fs::write(path, CONTENT_SCHEMA_VERSION.to_string()) {
         log::error!(
@@ -387,24 +341,13 @@ fn write_schema_marker(path: &std::path::Path) {
 
 pub const SCHEMA_MARKER_FILE: &str = "content.schema";
 
-/// How often opening the index writer is retried before giving up. Tantivy
-/// allows exactly one writer per index directory, and on Windows the previous
-/// writer's lock can outlive the handle for a few milliseconds: an index
-/// rebuild drops the old `IndexWriter` and reopens the directory right away,
-/// and the OCR job hit `LockBusy` there (`schema_v3_index_rebuilds_once_then_stays_put`).
-/// Twenty attempts at 100 ms is two seconds, which only costs time when the
-/// lock really is held by another process.
+/// Writer-open retries: on Windows a dropped writer's lock can briefly outlive the handle.
 const WRITER_OPEN_ATTEMPTS: u32 = 20;
 const WRITER_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Opens the single Tantivy writer for `index`, waiting out a transient
-/// `LockBusy`. Any other failure (permissions, corruption, a lock we cannot
-/// see) is reported immediately instead of being retried.
+/// Opens the single Tantivy writer, retrying only transient `LockBusy`.
 fn open_content_writer(index: &Index) -> Result<IndexWriter, String> {
-    // A desktop daemon should not reserve a large indexing arena. Tantivy
-    // requires ~15 MB per writer thread; one thread with a 16 MB arena keeps
-    // the resident footprint small. Indexing is I/O-bound for a personal
-    // corpus and extraction, not document insertion, is the real cost.
+    // One writer thread with a 16 MB arena keeps resident memory small; extraction dominates cost.
     let mut attempt = 1;
     loop {
         match index.writer_with_num_threads(1, 16_000_000) {
@@ -436,9 +379,7 @@ impl ContentIndex {
         let filename_field = schema_builder.add_text_field("filename", filename_options);
         let content_options = TextOptions::default().set_indexing_options(kensaku_indexing);
         let content_field = schema_builder.add_text_field("content", content_options);
-        // Frequencies only: folded search queries individual trigram terms
-        // through boolean term queries and verifies candidates against the
-        // stored raw text, so positions are never read. See schema v4.
+        // Frequencies only: folded search never reads positions.
         let folded_indexing = TextFieldIndexing::default()
             .set_tokenizer("trigram")
             .set_index_option(IndexRecordOption::WithFreqs);
@@ -448,8 +389,6 @@ impl ContentIndex {
         );
         let raw_field = schema_builder.add_text_field("content_raw", STORED);
         let modified_field = schema_builder.add_u64_field("modified", STORED | FAST);
-        // K12/B4: exact extension and byte size, indexed/fast so ext/size
-        // filters can narrow the Tantivy query before top-k collection.
         let ext_field = schema_builder.add_text_field("ext", STRING);
         let size_field = schema_builder.add_u64_field("size", FAST);
         let schema = schema_builder.build();
@@ -485,9 +424,7 @@ impl ContentIndex {
                 };
                 rebuild_reason = Some(reason.to_string());
                 log::info!("[Kensaku] Content index rebuild required: {}", reason);
-                // Tantivy schemas are immutable. Preserve the old derived index
-                // beside the live one and rebuild into the live path; the
-                // caller marks every file for content re-extraction.
+                // Schemas are immutable: keep the old index aside and rebuild in place.
                 drop(existing);
                 let stamp = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -548,11 +485,7 @@ impl ContentIndex {
         })
     }
 
-    /// Opens an existing index for searching only.
-    ///
-    /// Tantivy allows a writer in the GUI process and readers in other
-    /// processes at the same time, so the CLI/MCP surface uses this to read the
-    /// live index without taking the exclusive writer lock.
+    /// Opens an existing index for reading only, without taking the writer lock.
     pub fn open_read_only(index_dir: &Path) -> Result<Self, String> {
         if !index_dir.join("meta.json").exists() {
             return Err(format!("No content index at {}", index_dir.display()));
@@ -577,7 +510,6 @@ impl ContentIndex {
             .get_field("modified")
             .map_err(|e| format!("Content index is missing the 'modified' field: {}", e))?;
 
-        // Read-only handles need the kensaku and trigram tokenizers for query parsing.
         index
             .tokenizers()
             .register("kensaku", crate::indexer::tokenizer::kensaku_analyzer());
@@ -610,24 +542,17 @@ impl ContentIndex {
         })
     }
 
-    /// True when this handle can mutate the index.
     pub fn is_writable(&self) -> bool {
         self.writer.is_some()
     }
 
-    /// Deletes every document in the index and commits.
-    ///
-    /// Used by the in-process rebuild (`IndexerManager::rebuild_all`) when the
-    /// index directory itself could not be deleted because another handle
-    /// still had it mapped (Windows): purging logically is equivalent, and
-    /// Tantivy reclaims the space at the next segment merge.
+    /// Deletes every document and commits; used when the directory is still mapped (Windows).
     pub fn truncate(&mut self) -> Result<(), String> {
         {
             let mut writer = self.writer()?.write();
             writer.delete_all_documents().map_err(|e| e.to_string())?;
             writer.commit().map_err(|e| e.to_string())?;
         }
-        // Cached snippets belong to the deleted documents.
         self.snippet_cache = Mutex::new(SnippetCache::new(32));
         Ok(())
     }
@@ -638,8 +563,7 @@ impl ContentIndex {
             .ok_or_else(|| "index is read-only".to_string())
     }
 
-    /// Number of documents visible to the reader (including deleted-but-not-
-    /// yet-merged documents, which is what Tantivy reports).
+    /// Documents visible to the reader, including deleted-but-unmerged ones.
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
@@ -692,9 +616,6 @@ impl ContentIndex {
     }
 
     /// Queues deletion of many documents before the next commit.
-    ///
-    /// Used by the crawl to drop documents for files that disappeared from
-    /// disk. Unlike [`Self::purge_stale`] this never scans the whole index.
     pub fn remove_many(&self, paths: &[PathBuf]) -> Result<(), String> {
         if paths.is_empty() {
             return Ok(());
@@ -708,25 +629,15 @@ impl ContentIndex {
         Ok(())
     }
 
-    /// Deletes every indexed document whose path is not present in
-    /// `valid_paths`, except documents under `preserved_roots`.
-    ///
-    /// This is used after a full crawl to remove documents that belong to
-    /// files deleted while the application was not running (or to watched
-    /// directories removed from the configuration). `preserved_roots` are
-    /// configured roots that were unavailable during the crawl (unplugged
-    /// drive, unmounted share); their documents are kept so a transient outage
-    /// cannot wipe the index. Returns the number of documents purged.
+    /// Purges documents not in `valid_paths`, keeping those under unavailable `preserved_roots`.
     pub fn purge_stale(
         &self,
         valid_paths: &HashSet<PathBuf>,
         preserved_roots: &[PathBuf],
     ) -> Result<usize, String> {
-        // Read-only handles must fail before doing the (expensive) scan.
         self.writer()?;
 
-        // Documents store `to_string_lossy()` paths, so compare in the same
-        // representation to avoid purging valid non-UTF-8 paths.
+        // Stored paths are lossy strings; compare the same way to keep non-UTF-8 paths.
         let valid_lossy: HashSet<String> = valid_paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -787,8 +698,7 @@ impl ContentIndex {
         self.search_groups(&[(FieldKind::Any, query_str)], limit, path_prefix)
     }
 
-    /// Field-aware BM25 search. Each group is ANDed with the others; within a
-    /// group multi-word input narrows (conjunction by default).
+    /// Field-aware BM25 search; groups are ANDed, words within a group conjoined.
     pub fn search_groups(
         &self,
         groups: &[(FieldKind, &str)],
@@ -799,12 +709,7 @@ impl ContentIndex {
             .matches
     }
 
-    /// Like [`Self::search_groups`], plus optional `re:` patterns.
-    ///
-    /// Regex clauses are `Should` clauses and are only added when a pattern was
-    /// explicitly supplied by the caller (the query parser only sets the regex
-    /// flag for `re:` tokens). Plain term groups and regex clauses are combined
-    /// so that at least one of them must match.
+    /// Like [`Self::search_groups`], plus explicit `re:` patterns as `Should` clauses.
     pub fn search_groups_with_regex(
         &self,
         groups: &[(FieldKind, &str)],
@@ -821,8 +726,7 @@ impl ContentIndex {
         )
     }
 
-    /// Like [`Self::search_groups_with_regex`], with positive ext/size filters
-    /// pushed into the Tantivy query before top-k collection.
+    /// Like [`Self::search_groups_with_regex`], with ext/size filters pushed down.
     pub fn search_groups_filtered(
         &self,
         groups: &[(FieldKind, &str)],
@@ -850,8 +754,6 @@ impl ContentIndex {
             };
             let mut parser = QueryParser::for_index(&self.index, fields);
             parser.set_conjunction_by_default();
-            // `sanitize_query_text` removes every parser metacharacter, so this
-            // should always succeed; skip the group if it somehow does not.
             if let Ok(parsed) = parser.parse_query(&sanitized) {
                 plain_clauses.push((Occur::Must, parsed));
             }
@@ -918,11 +820,7 @@ impl ContentIndex {
         ContentSearchOutcome { matches, hints }
     }
 
-    /// Folded trigram search used only when exact BM25 left a shortfall.
-    ///
-    /// Candidates are retrieved from the 3-gram field, then verified against
-    /// the stored raw text with a length-dependent edit budget. This rejects
-    /// mass false positives from broad trigrams.
+    /// Folded trigram search for an exact-BM25 shortfall; candidates are verified against raw text.
     pub fn search_folded(
         &self,
         query: &str,
@@ -932,7 +830,6 @@ impl ContentIndex {
         self.search_folded_filtered(query, limit, path_prefix, &ContentFilters::default())
     }
 
-    /// Folded search with positive ext/size filters pushed down.
     pub fn search_folded_filtered(
         &self,
         query: &str,
@@ -1036,7 +933,6 @@ impl ContentIndex {
         results
     }
 
-    /// Combines a base query with the pushed-down scope and ext/size filters.
     fn effective_query(
         &self,
         base: Box<dyn Query>,
@@ -1058,7 +954,6 @@ impl ContentIndex {
         }
     }
 
-    /// Builds `Must` clauses for the filters that have a stored field.
     fn pushdown_clauses(&self, filters: &ContentFilters) -> Vec<(Occur, Box<dyn Query>)> {
         let mut clauses = Vec::new();
         if let (Some(field), Some(ext)) = (self.ext_field, filters.ext.as_deref()) {
@@ -1097,8 +992,6 @@ impl ContentIndex {
         let searcher = self.reader.searcher();
         let collector = TopDocs::with_limit(limit).order_by_score();
 
-        // Push the scope and ext/size filters down into the Tantivy query:
-        // only documents that can survive are scored at all.
         let effective_query = self.effective_query(query.box_clone(), path_prefix, filters);
 
         let top_docs = match searcher.search(effective_query.as_ref(), &collector) {
@@ -1116,7 +1009,6 @@ impl ContentIndex {
                     .unwrap_or("")
                     .to_string();
 
-                // Apply path prefix filter (pushed from scope)
                 if let Some(prefix) = path_prefix
                     && !path_str.starts_with(prefix)
                 {
@@ -1150,8 +1042,7 @@ impl ContentIndex {
         results
     }
 
-    /// Returns the stored original text for one path, when the schema has it.
-    /// Used by the idle screenshot-burst backfill; never runs extraction.
+    /// Stored original text for one path; never runs extraction.
     pub fn get_stored_text(&self, path: &Path) -> Option<String> {
         let field = self.content_raw_field?;
         let searcher = self.reader.searcher();
@@ -1174,13 +1065,7 @@ impl ContentIndex {
         Self::extract_snippet_from_text_cached(content, content_lower, query)
     }
 
-    /// Cheap, extraction-free snippet for query-time callers.
-    ///
-    /// Plain text/code/config files are read directly (at most 64 KB). Every
-    /// other format (PDF, Office, RTF, images, ...) is served only from the
-    /// extraction cache, so this never runs lopdf, unzip or tesseract on the
-    /// query path. A cold cache yields `None`; the UI fetches snippets
-    /// asynchronously via the `get_snippets` command instead.
+    /// Extraction-free snippet: plain text is read directly, other formats only from the cache.
     pub fn get_snippet_fast(&self, path: &Path, query: &str) -> Option<String> {
         snippet_for_path(path, query)
     }
@@ -1235,14 +1120,9 @@ impl ContentIndex {
     }
 }
 
-/// Bytes read when producing a snippet straight from a text file.
 const SNIPPET_READ_LIMIT: u64 = 64 * 1024;
 
-/// True when the extension is plain text, code or configuration.
-///
-/// Deliberately excludes PDF, Office/OpenDocument, eBook, RTF and image
-/// formats: those need an extractor (or OCR) and must never be read as a text
-/// file on the query path.
+/// True for plain text, code or config; never formats that need an extractor or OCR.
 pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
     let ext = match ext_opt {
         Some(ext) => ext.to_ascii_lowercase(),
@@ -1250,7 +1130,6 @@ pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
     };
 
     static PLAIN_TEXT_EXTENSIONS: &[&str] = &[
-        // Plain text / markup
         "txt",
         "md",
         "markdown",
@@ -1259,7 +1138,6 @@ pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
         "log",
         "diff",
         "patch",
-        // Code
         "rs",
         "ts",
         "tsx",
@@ -1289,7 +1167,6 @@ pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
         "zsh",
         "fish",
         "sql",
-        // Web
         "html",
         "htm",
         "css",
@@ -1300,7 +1177,6 @@ pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
         "astro",
         "graphql",
         "proto",
-        // Config
         "json",
         "toml",
         "yaml",
@@ -1316,16 +1192,13 @@ pub fn is_plain_text_extension(ext_opt: Option<&str>) -> bool {
     PLAIN_TEXT_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// Longest row snippet returned. Longer rows are cut and end with "...".
 const ROW_SNIPPET_BYTES: usize = 200;
 
-/// True for CSV and TSV files, which get row-aligned snippets.
 pub fn is_delimited_extension(ext_opt: Option<&str>) -> bool {
     matches!(ext_opt.map(str::to_ascii_lowercase).as_deref(), Some("csv" | "tsv"))
 }
 
-/// Snippet for a delimited file: the first row that contains a query term.
-/// Each row is one line, so the snippet never splits a row.
+/// Snippet for a delimited file: the first row containing a query term.
 fn delimited_row_snippet<'a>(mut rows: impl Iterator<Item = &'a str>, query: &str) -> Option<String> {
     let query_lower = query.to_lowercase();
     let terms: Vec<&str> = query_lower.split_whitespace().collect();
@@ -1344,9 +1217,6 @@ fn delimited_row_snippet<'a>(mut rows: impl Iterator<Item = &'a str>, query: &st
 }
 
 /// Builds a snippet without extracting anything.
-///
-/// Plain text is read directly; everything else only reads the extraction
-/// cache. See [`ContentIndex::get_snippet_fast`].
 pub fn snippet_for_path(path: &Path, query: &str) -> Option<String> {
     if crate::indexer::extract::markdown::is_markdown(path) {
         let text = crate::indexer::extract::text::extract_text(path, SNIPPET_READ_LIMIT as usize)?;
@@ -1386,7 +1256,6 @@ pub fn is_indexable_extension(ext_opt: Option<&str>) -> bool {
     };
 
     static TEXT_EXTENSIONS: &[&str] = &[
-        // Plain text and code
         "txt",
         "md",
         "markdown",
@@ -1442,7 +1311,6 @@ pub fn is_indexable_extension(ext_opt: Option<&str>) -> bool {
         "tex",
         "graphql",
         "proto",
-        // Documents & Office (PR 5)
         "pdf",
         "doc",
         "docx",
@@ -1491,17 +1359,13 @@ pub fn read_text_content(path: &Path, max_bytes: u64) -> Option<String> {
     crate::indexer::extract::extract_document(path, max_bytes).map(|doc| doc.text)
 }
 
-/// [`read_text_content`] plus whether the read was incomplete and should be
-/// retried (timeout, busy, or OCR that could not run yet).
+/// [`read_text_content`] plus whether the read was incomplete and should be retried.
 pub fn read_text_content_checked(path: &Path, max_bytes: u64) -> (Option<String>, bool) {
     let (document, retry) = crate::indexer::extract::extract_document_checked(path, max_bytes);
     (document.map(|doc| doc.text), retry)
 }
 
-/// Defuses QueryParser metacharacters in user-supplied text.
-///
-/// Replacing them with spaces preserves the surrounding words while ensuring
-/// raw `:`, quotes, `-`, boolean operators, etc. can never abort parsing.
+/// Replaces QueryParser metacharacters with spaces so parsing can never fail.
 pub fn sanitize_query_text(text: &str) -> String {
     text.replace(
         [
@@ -1564,25 +1428,20 @@ mod tests {
             rewrite_near_in_group("mouse near[5] button"),
             "\"mouse button\"~5"
         );
-        // Chains sum the operator distances into one phrase.
         assert_eq!(
             rewrite_near_in_group("mouse near[3] button near[2] click"),
             "\"mouse button click\"~5"
         );
-        // Consecutive operators: only the last distance binds.
         assert_eq!(
             rewrite_near_in_group("mouse near[5] near[2] button"),
             "\"mouse button\"~2"
         );
-        // Dangling/leading operators are dropped, never emitted as terms.
         assert_eq!(rewrite_near_in_group("mouse near[5]"), "mouse");
         assert_eq!(rewrite_near_in_group("near[5] mouse"), "mouse");
-        // Chain slop is clamped to the documented maximum.
         assert_eq!(
             rewrite_near_in_group("a near[60] b near[60] c"),
             "\"a b c\"~100"
         );
-        // Plain tokens still pass through sanitization.
         assert_eq!(rewrite_near_in_group("a near[1] c++"), "\"a c\"~1");
     }
 
@@ -1598,7 +1457,7 @@ mod tests {
         );
         index.commit().unwrap();
 
-        // "quick" -> "lazy" spans 6 words, i.e. slop 5 for a two-term phrase.
+        // Six words apart: slop 5.
         let hits = index.search("quick near[5] lazy", 10, None);
         assert!(
             hits.iter().any(|m| m.path.ends_with("doc.txt")),
@@ -1802,7 +1661,6 @@ mod tests {
 
         let hit = index.search_folded("東京大", 10, None);
         assert_eq!(hit.len(), 1);
-        // Terms under three characters are left to the exact/bounded fallback.
         assert!(index.search_folded("東京", 10, None).is_empty());
     }
 
@@ -1860,10 +1718,7 @@ mod tests {
 
     #[test]
     fn schema_v3_index_rebuilds_once_then_stays_put() {
-        // The upgrade this release makes: an index written at schema 3 must be
-        // rebuilt into the positionless trigram format, and must not be rebuilt
-        // again on the next launch. A rebuild on every launch is the exact
-        // failure mode reported earlier, so it is pinned here.
+        // A schema-3 index must rebuild once and then never again.
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -1878,7 +1733,6 @@ mod tests {
         let fresh = ContentIndex::new(&index_dir).expect("fresh index");
         drop(fresh);
 
-        // Pretend this directory was written by the previous release.
         fs::write(index_dir.join(SCHEMA_MARKER_FILE), "3").unwrap();
 
         let migrated = ContentIndex::new(&index_dir).expect("migrate v3 index");
@@ -1914,9 +1768,7 @@ mod tests {
 
     #[test]
     fn opening_a_busy_writer_lock_is_retried() {
-        // Windows keeps a just-dropped writer's lock file busy for a moment,
-        // which made the rebuild path fail with `LockBusy` in OCR CI. The
-        // reopen has to wait the lock out instead of surfacing an error.
+        // Rebuild must wait out the Windows `LockBusy` instead of failing.
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1981,13 +1833,11 @@ mod tests {
         );
         index.commit().unwrap();
 
-        // Exact BM25 cannot match an interior substring of a token.
         assert!(index.search("nutsmp", 10, None).is_empty());
         let substring = index.search_folded("nutsmp", 10, None);
         assert_eq!(substring.len(), 1);
         assert!(substring[0].path.ends_with("donuts.txt"));
 
-        // 0/o lookalike is folded; verification allows one misread.
         assert!(index.search("0RDER", 10, None).is_empty());
         let lookalike = index.search_folded("0RDER", 10, None);
         assert_eq!(lookalike.len(), 1);
@@ -2012,8 +1862,7 @@ mod tests {
         );
         index.commit().unwrap();
 
-        // d/cl folding makes "clock" fold to "dock", so the folded tier
-        // accepts it. "email" still has no folded match in "internally".
+        // d/cl folding: "clock" folds to "dock".
         let dock = index.search_folded("dock", 10, None);
         assert_eq!(dock.len(), 1);
         assert!(dock[0].path.ends_with("clock.txt"));
@@ -2099,7 +1948,7 @@ mod tests {
         );
         writer_index.commit().unwrap();
 
-        // The writer (and its exclusive Tantivy lock) is still alive here.
+        // The writer still holds the exclusive lock here.
         let reader = ContentIndex::open_read_only(&temp.dir).expect("open read-only");
         assert!(!reader.is_writable());
         assert!(reader.num_docs() >= 1);
@@ -2108,7 +1957,6 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].filename, "hello.txt");
 
-        // Mutations are rejected instead of touching the shared index.
         let err = reader
             .add_or_update(
                 Path::new("/tmp/kensaku/ro/other.txt"),
@@ -2148,8 +1996,7 @@ mod tests {
         assert!(snippet.contains("needle"), "got: {snippet}");
         let _ = fs::remove_file(&text_path);
 
-        // A document format with a cold extraction cache returns `None`
-        // immediately instead of running the PDF extractor at query time.
+        // Cold extraction cache: `None` without running the PDF extractor.
         let pdf_path = std::env::temp_dir().join(format!(
             "kensaku-fast-snippet-{}-{}.pdf",
             std::process::id(),
@@ -2300,7 +2147,6 @@ mod tests {
         );
         index.commit().unwrap();
 
-        // CJK filename exact and substring
         let hits = index.search("最終報告書", 10, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "最終報告書.pdf");
@@ -2309,14 +2155,12 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "最終報告書.pdf");
 
-        // Single-character CJK query
         let hits = index.search("最", 10, None);
         assert_eq!(hits.len(), 2);
         let names: Vec<&str> = hits.iter().map(|h| h.filename.as_str()).collect();
         assert!(names.contains(&"最終報告書.pdf"));
         assert!(names.contains(&"README最終.md"));
 
-        // CJK content word and substring
         let hits = index.search("東京", 10, None);
         assert_eq!(hits.len(), 2);
 
@@ -2324,7 +2168,6 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "weather.txt");
 
-        // Mixed-script queries
         let hits = index.search("README最終", 10, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "README最終.md");
@@ -2337,7 +2180,6 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "组件.ts");
 
-        // Scoped searches
         let hits = index.search_groups(&[(FieldKind::Name, "報告")], 10, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].filename, "最終報告書.pdf");
@@ -2409,7 +2251,7 @@ mod tests {
         let index_dir = root.join("index");
         fs::create_dir_all(&index_dir).unwrap();
 
-        // Create a legacy K5 index with content_folded and content_raw, but WITHOUT content.schema
+        // Legacy K5 index without a content.schema marker.
         let mut schema_builder = Schema::builder();
         schema_builder.add_text_field("path", STRING | STORED);
         schema_builder.add_text_field("filename", TEXT | STORED);
@@ -2429,7 +2271,6 @@ mod tests {
             .register("trigram", NgramTokenizer::new(3, 3, false).unwrap());
         drop(v1_index);
 
-        // First open: missing content.schema triggers rebuild
         let migrated = ContentIndex::new(&index_dir).expect("migrate to v2");
         assert!(migrated.rebuilt);
         assert_eq!(
@@ -2442,7 +2283,6 @@ mod tests {
         drop(migrated);
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        // Second open: marker exists, no rebuild triggered
         let second_open = ContentIndex::new(&index_dir).expect("open already-migrated index");
         assert!(!second_open.rebuilt);
         assert!(second_open.rebuild_reason.is_none());
@@ -2464,7 +2304,6 @@ mod tests {
         fs::create_dir_all(&old_dir).unwrap();
         fs::create_dir_all(&new_dir).unwrap();
 
-        // Old schema: SimpleTokenizer on filename and content
         let mut old_builder = Schema::builder();
         let old_path = old_builder.add_text_field("path", STRING | STORED);
         let old_filename = old_builder.add_text_field("filename", TEXT | STORED);
@@ -2473,7 +2312,6 @@ mod tests {
         let old_index = Index::create_in_dir(&old_dir, old_builder.build()).unwrap();
         let mut old_writer = old_index.writer(16_000_000).unwrap();
 
-        // New schema: ContentIndex with kensaku tokenizer
         let new_index = ContentIndex::new(&new_dir).unwrap();
 
         let cjk_sample_titles = [

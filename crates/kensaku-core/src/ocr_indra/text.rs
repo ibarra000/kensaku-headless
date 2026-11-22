@@ -1,8 +1,6 @@
-//! Text side of the Indra OCR port: CTC decoding, Hangul composition and
-//! right-to-left reordering (`vocab.py`, `rtl.py`).
+//! Indra OCR text side: CTC decoding, Hangul composition, RTL reordering.
 
-/// A recognizer's token list: class 0 is the CTC blank, class i + 1 is
-/// `chars[i]` (a character, or a LaTeX command in the base vocabulary).
+/// Class 0 is the CTC blank; class i + 1 is `chars[i]`.
 pub struct Vocab {
     chars: Vec<String>,
     has_commands: bool,
@@ -10,8 +8,7 @@ pub struct Vocab {
 }
 
 impl Vocab {
-    /// Parses one of meta.json's `vocab*` entries: a JSON string holding
-    /// `{"blank": 0, "chars": [...]}`.
+    /// Parses a meta.json `vocab*` entry (a JSON string of `{"blank", "chars"}`).
     pub fn from_meta(entry: &serde_json::Value) -> Result<Self, String> {
         let inner: serde_json::Value = match entry {
             serde_json::Value::String(s) => {
@@ -43,7 +40,6 @@ impl Vocab {
             .map(String::as_str)
     }
 
-    /// Text of the base recognizer's token ids (`Vocab.decode`).
     pub fn decode(&self, ids: &[i64]) -> String {
         let toks: Vec<&str> = ids.iter().filter_map(|&i| self.token(i)).collect();
         if self.jamo {
@@ -68,16 +64,14 @@ impl Vocab {
         out
     }
 
-    /// Text of a script-group recognizer's tokens: whitespace collapsed,
-    /// jamo composed. Right-to-left lines are still in visual order.
+    /// Whitespace collapsed, jamo composed; RTL lines stay in visual order.
     pub fn decode_chars(&self, ids: &[i64]) -> String {
         let raw: String = ids.iter().filter_map(|&i| self.token(i)).collect();
         compose_hangul(&raw.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 }
 
-/// NFC for Hangul only: conjoining jamo (L V [T]) become syllables. The CJK
-/// recognizer reads Korean as jamo; search needs the composed syllables.
+/// Composes conjoining jamo into syllables (the recognizer reads Korean as jamo).
 pub fn compose_hangul(text: &str) -> String {
     const S_BASE: u32 = 0xAC00;
     const L_BASE: u32 = 0x1100;
@@ -111,8 +105,7 @@ pub fn compose_hangul(text: &str) -> String {
     out.into_iter().collect()
 }
 
-/// Combining marks of the right-to-left scripts and generic diacritics: they
-/// stay after their base character when a run is reversed.
+/// Marks that stay after their base character when a run is reversed.
 fn is_mark(c: char) -> bool {
     matches!(c as u32,
         0x0300..=0x036F | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5
@@ -124,8 +117,7 @@ fn is_arabic_digit(c: char) -> bool {
     matches!(c as u32, 0x0660..=0x0669 | 0x06F0..=0x06F9)
 }
 
-/// Bidi class R or AL (Hebrew, Arabic, Syriac, Thaana, N'Ko and their
-/// presentation forms), without marks and digits.
+/// Bidi class R or AL, excluding marks and digits.
 pub fn is_rtl(c: char) -> bool {
     matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
         && !is_mark(c)
@@ -133,13 +125,12 @@ pub fn is_rtl(c: char) -> bool {
         && !c.is_whitespace()
 }
 
-/// Bidi class L, EN or AN: reads left to right inside right-to-left text.
+/// Bidi class L, EN or AN.
 fn is_ltr(c: char) -> bool {
     !is_rtl(c) && !is_mark(c) && c.is_alphanumeric()
 }
 
-/// Logical order from visual order (`rtl.flip`; the operation is its own
-/// inverse). `base_rtl`: the page reads right to left.
+/// Visual <-> logical order (`rtl.flip`, self-inverse). `base_rtl`: page reads RTL.
 pub fn flip(text: &str, base_rtl: bool) -> String {
     if !text.chars().any(is_rtl) {
         return text.to_string();
@@ -162,8 +153,6 @@ pub fn flip(text: &str, base_rtl: bool) -> String {
         }
     };
     let kinds: Vec<char> = clusters.iter().map(kind).collect();
-    // [start, end) spans from a `strong` cluster to the last `strong` one
-    // before a `stop` cluster.
     let runs = |strong: char, stop: char| {
         let mut spans = Vec::new();
         let (mut start, mut last) = (None, 0);
@@ -198,8 +187,6 @@ pub fn flip(text: &str, base_rtl: bool) -> String {
         std::iter::once(first).chain(chars).collect::<String>()
     };
     if base_rtl {
-        // Units: left-to-right runs kept whole, every other cluster alone;
-        // the units reverse.
         let mut units: Vec<String> = Vec::new();
         let mut i = 0;
         for (a, b) in runs('L', 'R').into_iter().chain([(clusters.len(), clusters.len())]) {
@@ -211,7 +198,6 @@ pub fn flip(text: &str, base_rtl: bool) -> String {
         }
         return units.into_iter().rev().collect();
     }
-    // Left-to-right base: each right-to-left run reverses in place.
     let mut out = clusters.clone();
     for (a, b) in runs('R', 'L') {
         for (k, cl) in clusters[a..b].iter().rev().enumerate() {
@@ -221,7 +207,6 @@ pub fn flip(text: &str, base_rtl: bool) -> String {
     out.concat()
 }
 
-/// Whether most letters on the page are right-to-left.
 pub fn page_is_rtl<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
     let (mut rtl, mut letters) = (0usize, 0usize);
     for c in texts.flat_map(str::chars).filter(|c| c.is_alphabetic()) {
@@ -231,9 +216,7 @@ pub fn page_is_rtl<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
     rtl > letters - rtl
 }
 
-/// A line of leader characters only (dot leaders, fill-in rules, specks)
-/// carries no text (`tidy_lines`). A short lone dash stays: it can be an
-/// empty table cell.
+/// Leader-only lines carry no text; a short lone dash stays (empty table cell).
 pub fn is_leader_line(text: &str, width: f32, height: f32) -> bool {
     const LEADERS: &str = ".·…‥_-–—=";
     let core: Vec<char> = text.chars().filter(|&c| c != ' ').collect();
@@ -272,9 +255,7 @@ mod tests {
     fn rtl_flip_matches_the_reference_and_is_its_own_inverse() {
         // Visual "םולש" (as the recognizer reads it) is logical "שלום".
         assert_eq!(flip("םולש", true), "שלום");
-        // Latin and digits keep their order inside a right-to-left line.
         assert_eq!(flip("2024 םולש", true), "שלום 2024");
-        // Left-to-right base: only the Hebrew run reverses.
         assert_eq!(flip("see םולש now", false), "see שלום now");
         for (text, base) in [("(בא) abc 12", true), ("x אב y", false)] {
             assert_eq!(flip(&flip(text, base), base), text);

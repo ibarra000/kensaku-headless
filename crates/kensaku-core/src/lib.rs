@@ -1,8 +1,5 @@
-//! Kensaku: local file and content search engine.
-//!
-//! Headless library. [`api`] is the public contract: [`api::Engine`] runs the
-//! index in-process, [`api::Client`] talks to the `kensaku` daemon, and both
-//! execute the same method table ([`api::METHODS`]).
+//! Kensaku: local file and content search engine (headless library).
+//! [`api`] is the public contract: in-process [`api::Engine`] or daemon [`api::Client`], same [`api::METHODS`].
 
 pub mod agent;
 pub mod api;

@@ -15,19 +15,16 @@ use std::time::Duration;
 
 /// Longest request line accepted; larger requests drop the connection.
 const MAX_LINE_BYTES: u64 = 1024 * 1024;
-/// Concurrent client connections served.
 const MAX_CONNECTIONS: usize = 64;
-/// Back-off after a failed `accept`, so a persistent error cannot spin.
+/// Back-off after a failed `accept` so a persistent error can't spin.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
-/// Lets a `shutdown`/`reset` reply reach the client before the process exits.
+/// Lets a `shutdown`/`reset` reply reach the client before exit.
 const EXIT_GRACE: Duration = Duration::from_millis(150);
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
-/// Why the daemon stopped before serving.
 #[derive(Debug)]
 pub enum ServeError {
-    /// Another daemon already owns this data directory.
     AlreadyRunning,
     Fatal(String),
 }
@@ -48,8 +45,7 @@ pub fn run() -> Result<(), ServeError> {
     fs::create_dir_all(&config_dir)
         .map_err(|e| ServeError::Fatal(format!("{}: {e}", config_dir.display())))?;
 
-    // Lock first: a second daemon must exit before touching the token,
-    // socket or stores of the running one.
+    // Lock first: a second daemon must exit before touching the running one's token, socket or stores.
     let runtime = Runtime::start().map_err(|e| match e {
         StartError::AlreadyRunning => ServeError::AlreadyRunning,
         StartError::Io(e) => ServeError::Fatal(e),
@@ -109,8 +105,7 @@ fn bind() -> Result<interprocess::local_socket::Listener, ServeError> {
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
     use std::os::unix::fs::PermissionsExt;
     let sock = super::socket_path();
-    // Only reached while holding the writer lock, so any socket file left
-    // here belongs to a dead daemon.
+    // We hold the writer lock, so any leftover socket belongs to a dead daemon.
     let _ = fs::remove_file(&sock);
     let name = sock
         .clone()
@@ -158,8 +153,7 @@ fn reply(writer: &mut impl Write, id: &Value, result: Result<Value, ApiError>) {
     let _ = writer.flush();
 }
 
-/// Reads one newline-terminated line of at most [`MAX_LINE_BYTES`].
-/// `None` on EOF, I/O error, an over-long line, or invalid UTF-8.
+/// Reads one line of at most [`MAX_LINE_BYTES`]; `None` on EOF, error, over-long line or bad UTF-8.
 fn read_line_bounded(reader: &mut impl BufRead) -> Option<String> {
     use std::io::Read as _;
     let mut buf = Vec::new();
@@ -261,9 +255,7 @@ mod cleanup {
 
     #[cfg(unix)]
     extern "C" fn handle_term(_sig: libc::c_int) {
-        // Only async-signal-safe calls: `unlink` with precomputed paths.
-        // SAFETY: both CStrings are statics initialized before the handler
-        // was installed and never mutated afterwards.
+        // SAFETY: only async-signal-safe `unlink` on statics initialized before the handler and never mutated.
         unsafe {
             if let Some(socket) = SOCKET_C.get() {
                 libc::unlink(socket.as_ptr());
@@ -277,15 +269,14 @@ mod cleanup {
 
     #[cfg(unix)]
     pub fn install_signal_handlers() {
-        // SAFETY: installing a handler that only performs async-signal-safe calls.
+        // SAFETY: the handler only performs async-signal-safe calls.
         unsafe {
             libc::signal(libc::SIGTERM, handle_term as *const () as libc::sighandler_t);
             libc::signal(libc::SIGINT, handle_term as *const () as libc::sighandler_t);
         }
     }
 
-    /// Windows: Ctrl+C/close in a foreground console ends the process and
-    /// the OS releases the lock and pipe; the stale pid file is harmless.
+    /// Windows: the OS releases the lock and pipe on exit; a stale pid file is harmless.
     #[cfg(not(unix))]
     pub fn install_signal_handlers() {}
 }

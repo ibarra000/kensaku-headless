@@ -11,15 +11,14 @@ const QUERY_LATENCY_CAPACITY: usize = 256;
 
 const QUERY_HISTORY_SHOWN: usize = 50;
 
-/// Process-global ring buffer of recent query wall times, in microseconds.
+/// Ring buffer of recent query wall times (µs).
 static QUERY_LATENCIES: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 
 static QUERY_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Process start time, used for the runtime uptime stat.
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
-/// Records the process start time. Called once from `run()`.
+/// Records the process start time; call once from `run()`.
 pub fn init_process_start() {
     PROCESS_START.get_or_init(Instant::now);
 }
@@ -28,7 +27,7 @@ pub fn record_query_latency(micros: u64) {
     QUERY_TOTAL.fetch_add(1, Ordering::Relaxed);
     let buffer =
         QUERY_LATENCIES.get_or_init(|| Mutex::new(VecDeque::with_capacity(QUERY_LATENCY_CAPACITY)));
-    // Recover from a poisoned lock instead of panicking: stats are best-effort.
+    // Stats are best-effort: recover from a poisoned lock.
     let mut guard = match buffer.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -49,7 +48,7 @@ fn query_latency_samples() -> Vec<u64> {
     guard.iter().copied().collect()
 }
 
-/// Nearest-rank percentile over ascending-sorted microsecond samples.
+/// Nearest-rank percentile over sorted µs samples.
 fn percentile_ms(sorted_micros: &[u64], percentile: f64) -> f64 {
     if sorted_micros.is_empty() {
         return 0.0;
@@ -66,7 +65,7 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Recursively sums regular files below `dir`. Symlinks are not followed.
+/// Recursively sums regular files; symlinks not followed.
 fn dir_size_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -85,8 +84,7 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Sums sizes of entries in the kensaku config directory whose name starts with
-/// `prefix` (e.g. `metadata.db` matches `metadata.db`, `metadata.db-wal`, ...).
+/// Sums entries in the config dir whose name starts with `prefix` (e.g. `metadata.db*`).
 fn config_prefixed_bytes(prefix: &str, include_dirs: bool) -> u64 {
     let dir = KensakuConfig::config_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -114,7 +112,7 @@ fn config_prefixed_bytes(prefix: &str, include_dirs: bool) -> u64 {
 
 #[cfg(target_os = "linux")]
 fn resident_set_bytes() -> u64 {
-    // /proc/self/statm: field 1 (index 1) is resident set size in pages.
+    // /proc/self/statm: field 1 is RSS in pages.
     const PAGE_SIZE: u64 = 4096;
     let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
         return 0;
@@ -129,10 +127,7 @@ fn resident_set_bytes() -> u64 {
 
 #[cfg(windows)]
 fn resident_set_bytes() -> u64 {
-    // Working set: this process's pages currently resident in physical
-    // memory — the same number Task Manager shows. The hide-path's
-    // EmptyWorkingSet trim legitimately drives it near zero while the
-    // window is gone; a zero reading there is the trim working, not a bug.
+    // Working set: resident pages, as Task Manager shows.
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -174,8 +169,7 @@ pub fn stats_for(indexer: &crate::indexer::IndexerManager) -> Result<serde_json:
     };
 
     let semantic_units = indexer.unit_store.read().len() as u64;
-    // Real Tantivy document count, independent of the current session's
-    // `content_indexed` counter (which resets on every launch).
+    // Real Tantivy doc count; `content_indexed` resets every launch.
     let content_docs = indexer
         .content_index
         .read()

@@ -7,11 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Durable metadata store backed by SQLite.
-///
-/// The connection is wrapped in a `Mutex` because `rusqlite::Connection` is
-/// `Send` but not `Sync`; this keeps `MetadataDb` (and therefore
-/// `MetadataStore` inside an `Arc<RwLock<..>>`) shareable across threads.
+/// SQLite metadata store; the connection is behind a `Mutex` because it is not `Sync`.
 pub struct MetadataDb {
     conn: Mutex<Connection>,
 }
@@ -31,12 +27,10 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Makes the batch so far durable and starts the next one. A crawl that is
-    /// killed mid-way (app closed, crash) otherwise rolls back every row it
-    /// wrote, so the next launch sees the whole tree as new and re-reads it.
+    /// Commits the batch so far so a killed crawl keeps its progress.
     pub fn commit_and_reopen(&self) -> Result<(), String> {
         self.commit_transaction()?;
-        // Keeps the WAL from growing for the whole crawl; PASSIVE never blocks.
+        // PASSIVE checkpoint bounds WAL growth without blocking.
         self.checkpoint_passive();
         self.begin_transaction()
     }
@@ -49,20 +43,13 @@ impl MetadataDb {
         Self::open_at(&db_dir.join("metadata.db"))
     }
 
-    /// Opens (and initializes) a database at `<dir>/metadata.db`.
-    ///
-    /// Used by the headless (CLI/MCP) surface to target an explicit config
-    /// directory, including temporary directories in tests.
+    /// Opens (and initializes) `<dir>/metadata.db`.
     pub fn open_in_dir(dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create metadata directory: {}", e))?;
         Self::open_at(&dir.join("metadata.db"))
     }
 
-    /// Opens (and initializes) a database at an explicit path.
-    ///
-    /// Used by [`Self::open`] and by tests so they never touch the real config
-    /// directory.
     fn open_at(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path)
             .map_err(|e| format!("Failed to open metadata database: {}", e))?;
@@ -111,9 +98,7 @@ impl MetadataDb {
         )
         .map_err(|e| format!("Failed to initialize metadata database: {}", e))?;
 
-        // Migration for databases created before file identity was tracked.
-        // `ALTER TABLE ... ADD COLUMN` fails with "duplicate column name" when
-        // the column already exists, which is expected and safe to ignore.
+        // Adding an existing column fails with "duplicate column name"; safe to ignore.
         for ddl in [
             "ALTER TABLE nodes ADD COLUMN dev INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE nodes ADD COLUMN ino INTEGER NOT NULL DEFAULT 0",
@@ -137,12 +122,10 @@ impl MetadataDb {
             }
         }
 
-        // Burst grouping and the missing-hash/backfill scans are image-only.
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS nodes_burst ON nodes(burst)", []);
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS nodes_phash ON nodes(phash)", []);
 
-        // Image hash space version. Bumping it invalidates stored hashes so
-        // `/dupes` never mixes hashes computed from different sources.
+        // Bumping this invalidates stored hashes so `/dupes` never mixes sources.
         const IMAGE_HASH_VERSION: &str = "2";
         let _ = conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('image_hash_version', ?1)",
@@ -163,7 +146,7 @@ impl MetadataDb {
             );
         }
 
-        // Must run after the `dev`/`ino` columns are guaranteed to exist.
+        // Must run after the `dev`/`ino` columns exist.
         if let Err(e) = conn.execute(
             "CREATE INDEX IF NOT EXISTS nodes_dev_ino ON nodes(dev, ino)",
             [],
@@ -171,7 +154,6 @@ impl MetadataDb {
             eprintln!("[Kensaku] Failed to create dev/ino index: {}", e);
         }
 
-        // Partial index for embedding queue: fast lookup of unembedded nodes
         if let Err(e) = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_nodes_unembedded ON nodes(indexed_gen) WHERE indexed_gen = 0",
             [],
@@ -179,9 +161,7 @@ impl MetadataDb {
             eprintln!("[Kensaku] Failed to create unembedded index: {}", e);
         }
 
-        // The embedding queue orders unembedded rows by `modified`, so the
-        // partial index above still needed a full scan plus a temp b-tree on
-        // every poll. Cover the order too.
+        // Covers the embedding queue's ORDER BY `modified` to avoid a temp b-tree.
         if let Err(e) = conn.execute(
             "CREATE INDEX IF NOT EXISTS nodes_unembedded_modified
              ON nodes(modified DESC, size) WHERE indexed_gen = 0",
@@ -190,9 +170,7 @@ impl MetadataDb {
             eprintln!("[Kensaku] Failed to create unembedded order index: {}", e);
         }
 
-        // Burst grouping probes candidates by neighbourhood, image dimensions
-        // and orientation. Without this it full-scans `nodes` once per image
-        // during a crawl and again in the backfill.
+        // Avoids a full scan per image during burst grouping.
         if let Err(e) = conn.execute(
             "CREATE INDEX IF NOT EXISTS nodes_burst_candidates
              ON nodes(is_dir, modified, width, height)",
@@ -201,7 +179,6 @@ impl MetadataDb {
             eprintln!("[Kensaku] Failed to create burst candidate index: {}", e);
         }
 
-        // Dedicated storage for visual embeddings (K18).
         if let Err(e) = conn.execute(
             "CREATE TABLE IF NOT EXISTS visual_units (
                 node_id INTEGER PRIMARY KEY,
@@ -218,20 +195,13 @@ impl MetadataDb {
             conn: Mutex::new(conn),
         };
 
-        // Reclaim a bloated free list at startup. Best-effort: a busy or
-        // read-only database must never prevent Kensaku from opening.
+        // Best-effort: a busy or read-only DB must not block opening.
         db.compact_if_bloated();
 
         Ok(db)
     }
 
-    /// VACUUMs the database when a large fraction of its pages are free.
-    ///
-    /// Long-running crawls delete and rewrite many rows; SQLite keeps the
-    /// freed pages inside the file, so it can grow to several hundred MB for
-    /// a small index. Compaction is skipped unless more than 1000 pages are
-    /// free *and* they exceed 20% of the file, which keeps startup cheap on
-    /// healthy databases. Errors are logged, never propagated.
+    /// VACUUMs when the free list is large (see [`should_vacuum`]); errors are logged only.
     pub fn compact_if_bloated(&self) {
         let conn = self.conn.lock();
 
@@ -274,7 +244,7 @@ impl MetadataDb {
         );
     }
 
-    /// Cheap WAL checkpoint after a crawl commit. Non-blocking by design.
+    /// Non-blocking WAL checkpoint.
     pub fn checkpoint_passive(&self) {
         let conn = self.conn.lock();
         if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)") {
@@ -328,11 +298,7 @@ impl MetadataDb {
         Ok(entries)
     }
 
-    /// Inserts or updates a node and returns its durable row id.
-    ///
-    /// The id matters for the crawl pipeline: semantic units are written in the
-    /// same pass as extraction, so the indexer needs the id immediately instead
-    /// of re-querying the database (or, worse, re-reading the file later).
+    /// Inserts or updates a node and returns its row id.
     pub fn upsert(&self, entry: &FileEntry) -> Result<u64, String> {
         let conn = self.conn.lock();
         conn.query_row(
@@ -382,22 +348,14 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Rewrites every node that is `old` or lives under `old` so that it lives
-    /// under `new` instead, preserving relative suffixes.
-    ///
-    /// The whole rewrite runs in one transaction so a crash cannot leave a
-    /// moved directory half-indexed at its old location. Rows that already sit
-    /// under the destination are dropped first: the filesystem rename replaced
-    /// that subtree and the caller re-indexes it. Returns the number of rows
-    /// moved.
+    /// Moves `old` and its descendants under `new` in one transaction, replacing rows already there.
     pub fn rename_prefix(&self, old: &Path, new: &Path) -> Result<usize, String> {
         let old_str = old.to_string_lossy().into_owned();
         let new_str = new.to_string_lossy().into_owned();
         if old_str.is_empty() || old_str == new_str {
             return Ok(0);
         }
-        // Trailing separator keeps the match component-aligned (`/a/b` must not
-        // match `/a/bc`).
+        // Trailing separator keeps the match component-aligned.
         let old_prefix = format!("{}{}", old_str, std::path::MAIN_SEPARATOR);
         let new_prefix = format!("{}{}", new_str, std::path::MAIN_SEPARATOR);
 
@@ -406,8 +364,7 @@ impl MetadataDb {
             .unchecked_transaction()
             .map_err(|e| format!("Failed to start rename transaction: {}", e))?;
 
-        // Comparing paths in Rust avoids SQL `LIKE` metacharacter surprises
-        // (`_` and `%` are legal in file names).
+        // Compare in Rust: `_` and `%` are legal in file names.
         let all_paths: Vec<String> = {
             let mut stmt = tx
                 .prepare("SELECT path FROM nodes")
@@ -444,7 +401,6 @@ impl MetadataDb {
                 .map_err(|e| format!("Failed to rename node path: {}", e))?;
         }
 
-        // Only the moved root changes its display name; descendants keep theirs.
         if moved > 0
             && let Some(name) = new.file_name()
         {
@@ -479,10 +435,7 @@ impl MetadataDb {
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
-    /// Total bytes occupied by stored embedding vectors (the `vec` BLOBs).
-    ///
-    /// Vectors live inside `metadata.db`, not in a separate `vectors/`
-    /// directory, so this is the honest on-disk cost of the semantic tier.
+    /// Total bytes of stored embedding vectors inside `metadata.db`.
     pub fn vector_bytes(&self) -> Result<u64, String> {
         let conn = self.conn.lock();
         let total: i64 = conn
@@ -495,7 +448,6 @@ impl MetadataDb {
         Ok(u64::try_from(total).unwrap_or(0))
     }
 
-    /// Number of file (non-directory) nodes that still need semantic units.
     pub fn count_unembedded(&self) -> Result<usize, String> {
         let conn = self.conn.lock();
         let count: i64 = conn
@@ -573,10 +525,7 @@ impl MetadataDb {
         Ok(conn.last_insert_rowid() as u64)
     }
 
-    /// Streams persisted units directly into an in-memory store.
-    ///
-    /// Unlike [`Self::load_all_units`] this never materializes a second copy of
-    /// every vector, which keeps startup memory flat on large indexes.
+    /// Streams persisted units into `store` without a second in-memory copy.
     pub fn load_units_into(&self, store: &mut crate::embed::UnitStore) -> Result<usize, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -653,10 +602,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Deletes every unit belonging to any of `node_ids` in one transaction.
-    ///
-    /// The crawl knows up front which files it is about to re-extract, so a
-    /// single batched delete replaces one statement per changed file.
+    /// Deletes every unit for `node_ids` in one transaction.
     pub fn delete_units_for_nodes(&self, node_ids: &[u64]) -> Result<(), String> {
         if node_ids.is_empty() {
             return Ok(());
@@ -753,7 +699,6 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Model id stored on the first semantic unit, if any units exist.
     pub fn units_model_id(&self) -> Result<Option<u32>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -776,11 +721,7 @@ impl MetadataDb {
         }
     }
 
-    /// Drops every semantic unit and re-queues all file nodes for embedding.
-    ///
-    /// Used when the semantic model changed, because vectors from different
-    /// models are not comparable. The in-memory [`crate::embed::UnitStore`] is
-    /// cleared separately by the caller.
+    /// Drops all semantic units and re-queues files; vectors from different models are incomparable.
     pub fn reset_semantic_index(&self) -> Result<(), String> {
         let conn = self.conn.lock();
         let tx = conn
@@ -869,10 +810,7 @@ impl MetadataDb {
         }
     }
 
-    /// Removes one row from its current burst before its content is rewritten.
-    /// If the row was the burst leader, the remaining members are re-homed to
-    /// their own lowest id so a changed screenshot cannot keep old versions
-    /// grouped under its id.
+    /// Removes a row from its burst; if it led the burst, re-homes members to their lowest id.
     fn detach_burst(conn: &Connection, path: &str) -> Result<Vec<(PathBuf, u64)>, String> {
         let row = conn
             .query_row(
@@ -919,15 +857,8 @@ impl MetadataDb {
         Ok(rows.flatten().collect())
     }
 
-    /// Stores the decoded image dimensions and perceptual hash for a node.
-    ///
-    /// Width, height and `phash` live only in the database (not on
-    /// [`FileEntry`]): they are large-index metadata used by thumbnails and
-    /// duplicate detection, not by search. `phash` is a full 64-bit value, so
-    /// it is stored as the bit-compatible `i64` SQLite integer.
-    ///
-    /// Returns re-homed `(path, burst)` rows when this image led a burst; the
-    /// caller applies them to the in-memory search view.
+    /// Stores image dimensions and perceptual hash (as bit-compatible `i64`).
+    /// Returns re-homed `(path, burst)` rows when this image led a burst.
     pub fn set_image_meta(
         &self,
         path: &Path,
@@ -948,11 +879,7 @@ impl MetadataDb {
         Ok(updates)
     }
 
-    /// Stores only the image dimensions for a node.
-    ///
-    /// The crawl uses this: reading the header is cheap, whereas decoding the
-    /// full image for a perceptual hash is not. The hash is filled in later by
-    /// the background backfill so it never gates OCR or index commits.
+    /// Stores only image dimensions; the hash is backfilled later so it never gates indexing.
     pub fn set_image_dimensions(&self, path: &Path, width: u32, height: u32) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -967,10 +894,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Stores (or finalizes) the perceptual hash for an image node.
-    ///
-    /// `u64::MAX` is the sentinel for "attempted, could not decode"; callers
-    /// exclude it from duplicate grouping and from the missing-hash scan.
+    /// Stores the perceptual hash; `u64::MAX` means "could not decode".
     pub fn set_image_phash(&self, path: &Path, phash: u64) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -981,9 +905,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Drops a stale perceptual hash when a changed image could not be hashed
-    /// during the write/crawl pass. The idle backfill recomputes it; leaving
-    /// the old hash would group the new pixels against the old burst.
+    /// Drops a stale hash so new pixels are not grouped against the old burst.
     pub fn clear_image_hash(&self, path: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
         let conn = self.conn.lock();
         let path = path.to_string_lossy().to_string();
@@ -996,10 +918,7 @@ impl MetadataDb {
         Ok(updates)
     }
 
-    /// Stores the compact line signature used for burst grouping. A changed
-    /// signature invalidates the old burst membership.
-    ///
-    /// Returns re-homed `(path, burst)` rows when this image led a burst.
+    /// Stores the line signature for burst grouping; returns re-homed rows when it led a burst.
     pub fn set_image_text_sig(
         &self,
         path: &Path,
@@ -1016,7 +935,6 @@ impl MetadataDb {
         Ok(updates)
     }
 
-    /// Image paths that have a perceptual hash but no burst assignment yet.
     pub fn image_paths_missing_burst(&self, limit: usize) -> Result<Vec<PathBuf>, String> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1036,15 +954,7 @@ impl MetadataDb {
         Ok(rows.flatten().map(PathBuf::from).collect())
     }
 
-    /// Assigns (or re-assigns) one image to the lowest-id compatible burst.
-    ///
-    /// Candidates must share a directory, fit the ten-minute capture window,
-    /// and have the same decoded dimensions. Text overlap plus perceptual
-    /// distance decide whether the pair is the same page. When the image
-    /// bridges multiple bursts, all of them merge into the lowest id.
-    ///
-    /// Returns every `(path, burst)` row touched so the in-memory search view
-    /// can be updated without a database round-trip per query.
+    /// Assigns an image to the lowest-id compatible burst (same dir, window and dimensions), merging bridged bursts.
     pub fn assign_burst_for_path(&self, path: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
         let conn = self.conn.lock();
         let current = conn
@@ -1099,8 +1009,7 @@ impl MetadataDb {
                AND width = ?4 AND height = ?5
              ORDER BY ABS(modified - ?6) ASC, id ASC LIMIT 128";
 
-        // Equal decoded dimensions are required. Without them a pair cannot be
-        // verified as the same capture, so the image keeps its own burst.
+        // Without equal dimensions a pair cannot be verified, so the image keeps its own burst.
         let candidates = if let (Some(width), Some(height)) = (width, height) {
             let mut statement = conn
                 .prepare(sql)
@@ -1189,8 +1098,7 @@ impl MetadataDb {
         Ok(rows.flatten().collect())
     }
 
-    /// Burst groups for the duplicates view. The burst id is the grouping key;
-    /// `look` supplies a stable display hash when one was hashed.
+    /// Burst groups for the duplicates view, keyed by burst id.
     pub fn burst_duplicate_groups(&self, limit: usize) -> Result<Vec<(u64, Vec<String>)>, String> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1231,7 +1139,6 @@ impl MetadataDb {
         Ok(groups)
     }
 
-    /// All assigned bursts, used to hydrate the in-memory search view.
     pub fn load_bursts(&self) -> Result<Vec<(u64, u64)>, String> {
         let conn = self.conn.lock();
         let mut statement = conn
@@ -1245,10 +1152,7 @@ impl MetadataDb {
         Ok(rows.flatten().collect())
     }
 
-    /// Image paths that have dimensions but no perceptual hash yet.
-    ///
-    /// `width IS NOT NULL` scopes this to rows the crawler identified as
-    /// raster images, so non-image files are never returned.
+    /// Raster image paths with dimensions but no perceptual hash yet.
     pub fn image_paths_missing_phash(&self, limit: usize) -> Result<Vec<PathBuf>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -1271,11 +1175,7 @@ impl MetadataDb {
         Ok(paths)
     }
 
-    /// Marks every still-present raster image as needing its content re-read.
-    ///
-    /// Used when the OCR setting changes: a cursor over the image rows is
-    /// cheaper than a full crawl and leaves every non-image entry untouched.
-    /// Returns the number of rows updated.
+    /// Marks every present raster image for a content re-read.
     pub fn mark_images_pending(&self) -> Result<usize, String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1287,8 +1187,7 @@ impl MetadataDb {
         .map_err(|e| format!("Failed to mark images pending: {}", e))
     }
 
-    /// Marks files with any of `extensions` (already normalized, no dot) for
-    /// a content re-read.
+    /// Marks files with any of `extensions` (normalized, no dot) for a content re-read.
     pub fn mark_extensions_pending(&self, extensions: &[String]) -> Result<usize, String> {
         if extensions.is_empty() {
             return Ok(0);
@@ -1309,7 +1208,6 @@ impl MetadataDb {
         Ok(marked)
     }
 
-    /// Marks every file below `dir` as needing a content re-read.
     pub fn mark_dir_content_pending(&self, dir: &Path) -> Result<usize, String> {
         let mut prefix = dir.to_string_lossy().into_owned();
         if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
@@ -1324,7 +1222,6 @@ impl MetadataDb {
         .map_err(|e| format!("Failed to mark '{}' pending: {}", dir.display(), e))
     }
 
-    /// Marks every file as needing a content re-read.
     pub fn mark_all_content_pending(&self) -> Result<usize, String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1334,7 +1231,6 @@ impl MetadataDb {
             .map_err(|e| format!("Failed to mark all content pending: {}", e))
     }
 
-    /// Sets the pending flag for a single path.
     pub fn set_content_pending(&self, path: &Path) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1345,12 +1241,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Flags exactly these files for a content re-read and a re-embedding.
-    ///
-    /// `indexed_gen` has to go back to 0 as well: a file that was embedded
-    /// before it became names-only still has `indexed_gen = 1`, so resetting
-    /// only `content_pending` would restore its full-text document but never
-    /// its semantic units.
+    /// Flags these files for re-read and re-embedding (resets `indexed_gen` too).
     pub fn mark_paths_content_pending(&self, paths: &[PathBuf]) -> Result<usize, String> {
         if paths.is_empty() {
             return Ok(0);
@@ -1371,14 +1262,7 @@ impl MetadataDb {
         Ok(total)
     }
 
-    /// How many times extraction has been attempted and left pending, and
-    /// whether another attempt is still worthwhile.
-    ///
-    /// A file that times out, or whose slot was saturated, is marked pending
-    /// and re-read on the next crawl. Without a cap, a file that always times
-    /// out was re-read on *every* launch, forever: the crawl never settled,
-    /// indexing appeared to run every time the app opened, and the same
-    /// expensive file was decoded again on each start.
+    /// Records a pending retry; returns whether another attempt is worthwhile (caps endless re-reads).
     pub fn record_retry(&self, path: &Path, max_attempts: u32) -> Result<bool, String> {
         let path_str = path.to_string_lossy().to_string();
         let conn = self.conn.lock();
@@ -1395,9 +1279,7 @@ impl MetadataDb {
             )
             .unwrap_or(0);
         if attempts >= i64::from(max_attempts) {
-            // Stop retrying until the file changes or OCR settings change.
-            // `content_pending` cleared means the next crawl skips it, so the
-            // launch reconcile goes quiet instead of repeating the same cost.
+            // Clear `content_pending` so later crawls skip it until the file changes.
             conn.execute(
                 "UPDATE nodes SET content_pending = 0 WHERE path = ?1",
                 params![&path_str],
@@ -1408,8 +1290,7 @@ impl MetadataDb {
         Ok(true)
     }
 
-    /// Marks every image *and every PDF* for a content re-read: what OCR
-    /// produces changed, and scanned PDFs are OCR'd too.
+    /// Marks every image and PDF for a content re-read.
     pub fn mark_ocr_targets_pending(&self) -> Result<usize, String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1421,7 +1302,6 @@ impl MetadataDb {
         .map_err(|e| format!("Failed to mark OCR targets pending: {}", e))
     }
 
-    /// Clears the pending flag for a single path.
     pub fn clear_content_pending(&self, path: &Path) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1438,11 +1318,7 @@ impl MetadataDb {
         Ok(())
     }
 
-    /// Groups nodes whose `content_hash` is identical.
-    ///
-    /// Returns `(hash, paths)` for groups with at least two members, largest
-    /// group first, capped at `limit` groups. Hashless rows (documents that
-    /// were never embedded, or files without extractable text) are ignored.
+    /// Groups nodes with identical `content_hash`, largest first; hashless rows ignored.
     pub fn exact_duplicate_groups(
         &self,
         limit: usize,
@@ -1477,14 +1353,7 @@ impl MetadataDb {
         Ok(finish_groups(groups, limit))
     }
 
-    /// Groups image nodes whose perceptual hashes are within `max_distance`
-    /// bits of each other (Hamming distance).
-    ///
-    /// Rows that already sit within the distance of a group's representative
-    /// join that group; a row far from every representative starts a new one.
-    /// Banded candidate lookup keeps the comparison count close to linear for
-    /// the common small-distance case (pigeonhole principle over `d + 1`
-    /// bands). At most 50k image rows are considered per call.
+    /// Groups images within `max_distance` Hamming bits, using banded lookup (max 50k rows).
     pub fn near_duplicate_groups(
         &self,
         max_distance: u32,
@@ -1512,9 +1381,7 @@ impl MetadataDb {
             })
             .map_err(|e| format!("Failed to query near-duplicate rows: {}", e))?;
 
-        // One bucket map per bit band. A pair within `max_distance` shares at
-        // least one band when there are `max_distance + 1` bands, so candidate
-        // retrieval never misses a true neighbour.
+        // With `max_distance + 1` bands, any true neighbour shares at least one band (pigeonhole).
         let bands = usize::try_from(max_distance + 1).unwrap_or(64).clamp(1, 64);
         let mut band_index: Vec<HashMap<u64, Vec<usize>>> = vec![HashMap::new(); bands];
         let mut representatives: Vec<u64> = Vec::new();
@@ -1569,16 +1436,11 @@ impl MetadataDb {
     }
 }
 
-/// Whether a database is bloated enough to justify a `VACUUM`.
-///
-/// Requires both a meaningful absolute free list (more than 1000 pages) and a
-/// meaningful ratio (more than 20% of all pages), so a large but healthy index
-/// is never rewritten at startup.
+/// True when free pages exceed 1000 and 20% of the file.
 fn should_vacuum(page_count: u64, freelist_count: u64) -> bool {
     page_count > 0 && freelist_count > 1000 && (freelist_count as f64 / page_count as f64) > 0.20
 }
 
-/// Extracts the bits covered by band `band` of a `bands`-way split of 64 bits.
 fn band_key(phash: u64, band: usize, bands: usize) -> u64 {
     let start = (band * 64 / bands) as u32;
     let end = ((band + 1) * 64 / bands) as u32;
@@ -1591,7 +1453,6 @@ fn band_key(phash: u64, band: usize, bands: usize) -> u64 {
     (phash >> start) & mask
 }
 
-/// Sorts, trims and caps exact-duplicate groups.
 fn finish_groups(groups: HashMap<String, Vec<String>>, limit: usize) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = groups
         .into_iter()
@@ -1635,7 +1496,7 @@ mod tests {
 
     impl Drop for TempDb {
         fn drop(&mut self) {
-            // Close the connection before deleting the directory (Windows).
+            // Close before deleting the directory (Windows).
             self.db.take();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -1684,8 +1545,7 @@ mod tests {
         db.commit_and_reopen().unwrap();
         db.upsert(&entry(Path::new("/a/two.txt"), false)).unwrap();
 
-        // A second connection sees only what was committed, as a restarted
-        // app would after the crawl was killed.
+        // A second connection sees only committed rows.
         let other = rusqlite::Connection::open_with_flags(
             temp.dir.join("metadata.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1704,16 +1564,11 @@ mod tests {
 
     #[test]
     fn vacuum_requires_both_a_large_free_list_and_a_large_ratio() {
-        // Healthy: few free pages.
         assert!(!should_vacuum(100_000, 500));
-        // Big absolute free list but a tiny fraction.
         assert!(!should_vacuum(100_000, 1_001));
-        // Large fraction but below the absolute floor.
         assert!(!should_vacuum(4_000, 1_000));
-        // Both conditions met.
         assert!(should_vacuum(10_000, 3_000));
         assert!(should_vacuum(1_001, 1_001));
-        // Degenerate inputs never panic or trigger.
         assert!(!should_vacuum(0, 0));
     }
 
@@ -1729,7 +1584,6 @@ mod tests {
         db.upsert(&entry(&old_root.join("nested"), true)).unwrap();
         db.upsert(&entry(&old_root.join("nested").join("b.rs"), false))
             .unwrap();
-        // Component-aligned prefix: a sibling with a longer name must survive.
         let sibling = temp.dir.join("oldish").join("c.txt");
         db.upsert(&entry(&sibling, false)).unwrap();
 
@@ -1761,8 +1615,7 @@ mod tests {
         let temp = TempDb::new("near-duplicates");
         let db = temp.db();
 
-        // High bit set keeps the value above i64::MAX, exercising the
-        // bit-compatible signed storage.
+        // High bit set exercises signed i64 storage.
         let base = 0xF000_0000_0000_0000u64;
         let similar_one = base ^ 0b1;
         let similar_two = base ^ 0b111;
@@ -1825,8 +1678,7 @@ mod tests {
             .expect("document row");
         assert!(!loaded_doc.content_pending);
 
-        // A later upsert (e.g. from a crawl) must not reset the flag before
-        // the image has been re-read.
+        // A later upsert must not reset the flag before the re-read.
         let mut cleared = entry(&image, false);
         cleared.content_pending = false;
         db.upsert(&cleared).expect("upsert same image");
@@ -2053,8 +1905,7 @@ mod tests {
             (path, id)
         };
 
-        // A and C share text; B and C are visually identical. A and B match
-        // neither rule, so C is the bridge that must merge both groups.
+        // A~C by text, B~C visually: C bridges both groups.
         let text = "alpha one\nbeta two\ngamma three\ndelta four";
         let (a, a_id) = add("a.png", 2_000, 0, text);
         db.assign_burst_for_path(&a).expect("assign a");
@@ -2097,8 +1948,7 @@ mod tests {
             vec![(a_id, a_id), (b_id, a_id)]
         );
 
-        // A is the leader. Rewriting it with unrelated text must detach it and
-        // re-home B under its own id before the new assignment runs.
+        // Rewriting leader A must re-home B under its own id.
         db.set_image_text_sig(
             &a,
             &crate::indexer::burst::line_signature(
@@ -2154,7 +2004,6 @@ mod tests {
         let image = temp.dir.join("photo.jpg");
         db.upsert(&entry(&image, false)).expect("insert image row");
 
-        // Dimensions alone make the row eligible for the background backfill.
         db.set_image_dimensions(&image, 64, 48)
             .expect("store dimensions");
         assert_eq!(
@@ -2176,7 +2025,6 @@ mod tests {
             "a single image cannot form a group"
         );
 
-        // Failure sentinel must stop retries and stay out of duplicate groups.
         db.set_image_phash(&image, u64::MAX)
             .expect("store failure sentinel");
         assert!(
@@ -2197,14 +2045,12 @@ mod tests {
         let db = temp.db();
         let path = Path::new("/path/to/doc.pdf");
 
-        // Record first open
         db.record_open(path).expect("first record_open");
         let usage = db.load_usage().expect("load_usage");
         let &(count, last_opened) = usage.get(path).expect("path in usage");
         assert_eq!(count, 1);
         assert!(last_opened > 0);
 
-        // Record second open
         db.record_open(path).expect("second record_open");
         let usage2 = db.load_usage().expect("load_usage");
         let &(count2, last_opened2) = usage2.get(path).expect("path in usage");
@@ -2225,7 +2071,6 @@ mod tests {
         let id2 = db.upsert(&entry(p2, false)).expect("insert b");
         assert_eq!(db.count().unwrap(), 2);
 
-        // Lookup by path
         assert_eq!(db.get_node_id_by_path(p1).unwrap(), Some(id1));
         assert_eq!(db.get_node_id_by_path(p2).unwrap(), Some(id2));
         assert_eq!(
@@ -2233,13 +2078,11 @@ mod tests {
             None
         );
 
-        // Remove single entry
         db.remove(p1).expect("remove p1");
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.get_node_id_by_path(p1).unwrap(), None);
         assert_eq!(db.get_node_id_by_path(p2).unwrap(), Some(id2));
 
-        // Clear all entries
         db.clear().expect("clear db");
         assert_eq!(db.count().unwrap(), 0);
         assert_eq!(db.get_node_id_by_path(p2).unwrap(), None);
@@ -2253,13 +2096,11 @@ mod tests {
         let node_id = db.upsert(&entry(Path::new("/file.txt"), false)).unwrap();
         let vector: [i8; 4] = [10, -20, 30, -40];
 
-        // Insert unit
         let unit_id = db
             .insert_unit(node_id, 0, 100, 1, &vector)
             .expect("insert unit");
         assert!(unit_id > 0);
 
-        // Load units
         let all_units = db.load_all_units().expect("load units");
         assert_eq!(all_units.len(), 1);
         assert_eq!(all_units[0].0.node_id, node_id);
@@ -2268,12 +2109,10 @@ mod tests {
         assert_eq!(all_units[0].0.model_id, 1);
         assert_eq!(all_units[0].1, vector);
 
-        // Delete units for node
         db.delete_units_for_nodes(&[node_id]).expect("delete units");
         let after_del = db.load_all_units().expect("load units after del");
         assert!(after_del.is_empty());
 
-        // Insert again and test reset_semantic_index
         db.insert_unit(node_id, 0, 50, 1, &vector).unwrap();
         assert_eq!(db.load_all_units().unwrap().len(), 1);
         db.reset_semantic_index().expect("reset semantic index");

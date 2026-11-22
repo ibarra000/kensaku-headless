@@ -13,12 +13,7 @@ pub struct SemanticHit {
 pub struct ExactScanner;
 
 impl ExactScanner {
-    /// Exact parallel scan over memory-mapped / in-memory i8 vectors.
-    /// Returns top-k hits grouped by node_id with max score and best unit range.
-    ///
-    /// When `allowed` is `Some`, units whose `node_id` is not in the set are
-    /// skipped before computing cosine similarity. This keeps scoped/filtered
-    /// queries from scoring the entire corpus.
+    /// Exact parallel top-k scan grouped by node_id; `allowed` filters before scoring.
     pub fn scan(
         query_vec: &[i8],
         store: &UnitStore,
@@ -28,15 +23,7 @@ impl ExactScanner {
         Self::scan_with_model(query_vec, store, allowed, limit, None)
     }
 
-    /// Exact parallel scan over memory-mapped / in-memory i8 vectors.
-    /// Returns top-k hits grouped by node_id with max score and best unit range.
-    ///
-    /// When `allowed` is `Some`, units whose `node_id` is not in the set are
-    /// skipped before computing cosine similarity. This keeps scoped/filtered
-    /// queries from scoring the entire corpus.
-    ///
-    /// When `expected_model_id` is `Some`, units created by a different model
-    /// are skipped so vectors from different models/spaces are never compared.
+    /// Like [`Self::scan`], skipping units from a model other than `expected_model_id`.
     pub fn scan_with_model(
         query_vec: &[i8],
         store: &UnitStore,
@@ -52,7 +39,6 @@ impl ExactScanner {
         let units = &store.units;
         let vectors = &store.vectors;
 
-        // 8-way parallel scan over units using Rayon
         let scored_units: Vec<(usize, f32)> = (0..units.len())
             .into_par_iter()
             .filter_map(|idx| {
@@ -79,7 +65,6 @@ impl ExactScanner {
             .filter(|&(_, sim)| sim > 0.05)
             .collect();
 
-        // Group by node_id, keeping highest scoring unit per node
         let mut node_best: HashMap<u64, (f32, usize)> = HashMap::new();
         for (unit_idx, sim) in scored_units {
             let node_id = units[unit_idx].node_id;
@@ -93,8 +78,7 @@ impl ExactScanner {
                 .or_insert((sim, unit_idx));
         }
 
-        // Rank on (node, score, unit index) and clone a Unit only for the
-        // survivors: most nodes above the threshold are cut by `limit`.
+        // Clone a Unit only for survivors; most nodes are cut by `limit`.
         let mut ranked: Vec<(u64, f32, usize)> = node_best
             .into_iter()
             .map(|(node_id, (score, best_idx))| (node_id, score, best_idx))
@@ -139,7 +123,6 @@ mod tests {
         store.add_unit(unit(0, 1), &[127, 0, 0, 0]);
         store.add_unit(unit(1, 2), &[0, 127, 0, 0]);
 
-        // Query matches node 2 exactly.
         let query = [0i8, 127, 0, 0];
 
         let all = ExactScanner::scan(&query, &store, None, 10);
@@ -169,25 +152,20 @@ mod tests {
 
         let query = [127i8, 0, 0, 0];
 
-        // Active model is 1: unit 2 must be ignored
         let hits = ExactScanner::scan_with_model(&query, &store, None, 10, Some(1));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node_id, 1);
 
-        // Active model is 2: unit 1 must be ignored
         let hits = ExactScanner::scan_with_model(&query, &store, None, 10, Some(2));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node_id, 2);
 
-        // Active model is 3: neither matches
         let hits = ExactScanner::scan_with_model(&query, &store, None, 10, Some(3));
         assert!(hits.is_empty());
     }
-    // ── Additional coverage ───────────────────────────────────────────────────
 
     #[test]
     fn limit_is_respected_when_many_nodes_match() {
-        // Create 10 nodes that all perfectly match the query vector.
         let mut store = UnitStore::new(4);
         for node_id in 1u64..=10 {
             store.add_unit(unit(node_id, node_id), &[127i8, 0, 0, 0]);
@@ -200,39 +178,31 @@ mod tests {
     #[test]
     fn results_are_ordered_by_score_descending() {
         let mut store = UnitStore::new(4);
-        // node 1: perfect match for [127,0,0,0].
         store.add_unit(unit(0, 1), &[127i8, 0, 0, 0]);
-        // node 2: partial match.
         store.add_unit(unit(1, 2), &[100i8, 50, 0, 0]);
-        // node 3: weaker match.
         store.add_unit(unit(2, 3), &[60i8, 60, 60, 0]);
 
         let query = [127i8, 0, 0, 0];
         let hits = ExactScanner::scan(&query, &store, None, 10);
 
-        // Must be sorted descending by score.
         for window in hits.windows(2) {
             assert!(
                 window[0].score >= window[1].score,
                 "results not in descending score order"
             );
         }
-        // Perfect match must be first.
         assert_eq!(hits[0].node_id, 1);
     }
 
     #[test]
     fn score_threshold_filters_low_similarity_units() {
         let mut store = UnitStore::new(4);
-        // node 1: perfectly orthogonal to the query — similarity ~0, below 0.05 threshold.
         store.add_unit(unit(0, 1), &[0i8, 127, 0, 0]);
-        // node 2: strongly aligned.
         store.add_unit(unit(1, 2), &[127i8, 0, 0, 0]);
 
         let query = [127i8, 0, 0, 0];
         let hits = ExactScanner::scan(&query, &store, None, 10);
 
-        // node 1 has cosine ≈ 0 with [127,0,0,0] so it should be filtered.
         assert!(
             hits.iter().all(|h| h.node_id != 1),
             "node 1 should be filtered by the 0.05 score threshold"
@@ -246,7 +216,6 @@ mod tests {
         let mut store = UnitStore::new(4);
         store.add_unit(unit(0, 1), &[127i8, 0, 0, 0]);
 
-        // query vec length 3 ≠ store.dim 4
         let query = [127i8, 0, 0];
         let hits = ExactScanner::scan(&query, &store, None, 10);
         assert!(hits.is_empty(), "dim mismatch must return empty");
@@ -266,7 +235,6 @@ mod tests {
         store.add_unit(unit(0, 1), &[127i8, 0, 0, 0]);
         store.add_unit(unit(1, 2), &[127i8, 0, 0, 0]);
 
-        // allowed set contains node 99 which isn't in the store.
         let allowed: HashSet<u64> = [99u64].into_iter().collect();
         let hits = ExactScanner::scan(&query_vec(), &store, Some(&allowed), 10);
         assert!(hits.is_empty());

@@ -2,15 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Machine-readable error category. The string form (`as_str`) is part of the
-/// public contract and is carried in JSON-RPC `error.data.code` and HTTP
-/// error bodies.
+/// Machine-readable error category; `as_str` is public contract (JSON-RPC `error.data.code`, HTTP bodies).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// Missing or malformed parameters.
     InvalidParams,
-    /// No such method.
     MethodNotFound,
     /// No index exists yet (run `kensaku setup`).
     NoIndex,
@@ -18,11 +14,10 @@ pub enum ErrorCode {
     NotSetup,
     /// The daemon is not running and could not be started.
     DaemonUnavailable,
-    /// The caller is not allowed to do this (scope, write gating, token).
+    /// Disallowed by scope, write gating or token.
     Forbidden,
-    /// The operation conflicts with work already in progress.
+    /// Conflicts with work in progress.
     Busy,
-    /// Anything else.
     Internal,
 }
 
@@ -53,7 +48,6 @@ impl ErrorCode {
         }
     }
 
-    /// JSON-RPC 2.0 numeric code.
     pub fn rpc_code(self) -> i64 {
         match self {
             Self::InvalidParams => -32602,
@@ -67,7 +61,6 @@ impl ErrorCode {
         }
     }
 
-    /// HTTP status for the REST surface.
     pub fn http_status(self) -> u16 {
         match self {
             Self::InvalidParams => 400,
@@ -79,7 +72,7 @@ impl ErrorCode {
         }
     }
 
-    /// CLI process exit code. 0/1/2/3 keep their historical meaning.
+    /// CLI exit code; 0/1/2/3 are stable.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::InvalidParams | Self::MethodNotFound => 2,
@@ -92,7 +85,7 @@ impl ErrorCode {
     }
 }
 
-/// An API failure: a stable [`ErrorCode`] plus a human-readable message.
+/// Stable [`ErrorCode`] plus a human-readable message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: ErrorCode,
@@ -115,7 +108,6 @@ impl ApiError {
         Self::new(ErrorCode::Internal, message)
     }
 
-    /// JSON-RPC `error` object.
     pub fn to_rpc(&self) -> serde_json::Value {
         serde_json::json!({
             "code": self.code.rpc_code(),
@@ -124,7 +116,7 @@ impl ApiError {
         })
     }
 
-    /// Rebuilds an error from a JSON-RPC `error` object (inverse of [`Self::to_rpc`]).
+    /// Inverse of [`Self::to_rpc`].
     pub fn from_rpc(error: &serde_json::Value) -> Self {
         let message = error
             .get("message")
@@ -153,7 +145,6 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-/// Legacy `Result<_, String>` errors from the core are internal failures.
 impl From<String> for ApiError {
     fn from(message: String) -> Self {
         if message == crate::agent::NO_INDEX_MESSAGE {

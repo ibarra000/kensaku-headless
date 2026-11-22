@@ -1,12 +1,5 @@
-//! CSV and TSV extraction.
-//!
-//! Each data row becomes one line of text: the header repeated as
-//! `column = "value"` pairs. A search for a column name or a cell value then
-//! lands on the row that holds it. Lines are separated by newlines, so a
-//! newline inside a cell is flattened to a space.
-//!
-//! The parser borrows field text from the input wherever it can, and writes
-//! each row straight into the output, so a plain cell costs no allocation.
+//! CSV/TSV extraction: each row becomes one line of `column = "value"` pairs
+//! (in-cell newlines flattened to spaces).
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -15,13 +8,10 @@ use std::path::Path;
 
 use super::text::decode_utf16_bom;
 
-/// Only the start of the file is used to choose the delimiter.
 const SNIFF_BYTES: usize = 8 * 1024;
-/// How many records are compared when choosing the delimiter.
 const SNIFF_RECORDS: usize = 20;
 
-/// Extracts text from a CSV or TSV file like `pandas.head`: a column summary
-/// and the first `head_rows` data rows, reading at most `max_bytes`.
+/// Extracts a column summary and the first `head_rows` rows, reading at most `max_bytes`.
 pub fn extract_delimited(path: &Path, max_bytes: usize, head_rows: usize) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let truncated = file.metadata().ok()?.len() > max_bytes as u64;
@@ -33,20 +23,14 @@ pub fn extract_delimited(path: &Path, max_bytes: usize, head_rows: usize) -> Opt
     render_rows(&buffer, truncated, hint_for_path(path), max_bytes, Some(head_rows))
 }
 
-/// Row text as separate lines, for the snippet path. Rows are never split.
+/// Row text as separate lines for snippets; rows are never split.
 pub(crate) fn row_blocks(buffer: &[u8], truncated: bool, hint: u8) -> Vec<String> {
     render_rows(buffer, truncated, hint, usize::MAX, None)
         .map(|text| text.lines().map(str::to_string).collect::<Vec<String>>())
         .unwrap_or_default()
 }
 
-/// Decodes `buffer` and renders one line per data row, up to `cap` bytes.
-///
-/// `truncated` means the buffer is only the start of a larger file: a last
-/// record that ends without a line break may be cut off, so it is dropped.
-/// `hint` is the delimiter to prefer when candidates look equally consistent.
-/// `head_rows` of `Some(n)` keeps only the first `n` data rows and puts a
-/// column summary (names and inferred types) first; `None` renders every row.
+/// Renders one line per data row up to `cap`; when `truncated`, an unterminated last record is dropped.
 fn render_rows(
     buffer: &[u8],
     truncated: bool,
@@ -112,7 +96,6 @@ fn render_rows(
             return true;
         }
         if mark == 0 {
-            // The first row alone is longer than the cap: keep the part that fits.
             let keep = clip_to_char_boundary(&out, cap).len();
             out.truncate(keep);
         } else {
@@ -122,7 +105,6 @@ fn render_rows(
     });
 
     if out.is_empty() {
-        // No data rows: index the column names so they stay searchable.
         out = names?.join(", ");
         if out.len() > cap {
             let keep = clip_to_char_boundary(&out, cap).len();
@@ -139,7 +121,6 @@ fn render_rows(
             summary.push_str(kind.label());
             summary.push(')');
         }
-        // A very wide header must not outgrow the row text it describes.
         summary.truncate(clip_to_char_boundary(&summary, 8 * 1024).len());
         out = format!("{summary}\n{out}");
     }
@@ -150,7 +131,6 @@ fn render_rows(
     }
 }
 
-/// What a column holds, judged from the sampled rows.
 #[derive(Clone, Copy, PartialEq)]
 enum CellKind {
     Empty,
@@ -190,8 +170,7 @@ impl CellKind {
     }
 }
 
-/// Decodes UTF-16 (with its BOM), or UTF-8 with an optional UTF-8 BOM.
-/// Returns None for binary data, using the same NUL-byte check as plain text.
+/// Decodes UTF-16 (BOM) or UTF-8; None for binary data (NUL-byte check).
 fn decode_text(buffer: &[u8]) -> Option<Cow<'_, str>> {
     if let Some(text) = decode_utf16_bom(buffer) {
         return Some(Cow::Owned(text));
@@ -210,17 +189,12 @@ fn decode_text(buffer: &[u8]) -> Option<Cow<'_, str>> {
     })
 }
 
-/// Picks the delimiter whose first records agree on the most fields.
-/// Ties go to the earlier candidate, so the hint is tried first.
+/// Picks the delimiter whose first records agree most; ties favor the hint.
 fn sniff_delimiter(text: &str, hint: u8) -> u8 {
     let sample = clip_to_char_boundary(text, SNIFF_BYTES);
-    // (delimiter, records that agree on the field count, field count)
+    // (delimiter, agreeing records, field count)
     let mut best = (hint, 0usize, 0usize);
-    // Scan each unique candidate exactly once: the old list repeated the
-    // hint (tab for `.tsv`, comma otherwise), so a quarter of the sniff
-    // work re-parsed the first scan. Ties prefer the earlier candidate, so
-    // the hint must lead: hint → comma → semi → tab for TSV, collapsed to
-    // comma → semi → tab for everything else.
+    // Each candidate once; ties prefer the earlier one, so the hint leads.
     let order: [u8; 3] = if hint == b'\t' {
         *b"\t,;"
     } else {
@@ -247,9 +221,7 @@ fn sniff_delimiter(text: &str, hint: u8) -> u8 {
     best.0
 }
 
-/// Calls `visit` with the fields of each record, in order. The bool passed
-/// with the fields is false when the record ends at the end of the text
-/// without a line break. Blank lines are skipped. Returning false stops.
+/// Visits each record's fields; the bool is false for an unterminated final record. Blank lines skipped.
 fn for_each_record<'a>(
     text: &'a str,
     delimiter: u8,
@@ -269,7 +241,6 @@ fn for_each_record<'a>(
             if pos >= len {
                 break false;
             }
-            // Here `pos` is a delimiter, a line break, or the end of the text.
             match bytes[pos] {
                 b'\n' => {
                     pos += 1;
@@ -285,7 +256,6 @@ fn for_each_record<'a>(
                 _ => pos += 1,
             }
         };
-        // A blank line is one empty field: skip it.
         if fields.len() == 1 && fields[0].is_empty() {
             continue;
         }
@@ -295,8 +265,7 @@ fn for_each_record<'a>(
     }
 }
 
-/// Reads one field starting at `start`. Returns its value and the position of
-/// the delimiter, line break or end of text that follows it.
+/// Reads one field at `start`; returns it and the position of the following separator.
 fn read_field(text: &str, start: usize, delimiter: u8) -> (Cow<'_, str>, usize) {
     let bytes = text.as_bytes();
     if bytes.get(start) == Some(&b'"') {
@@ -309,9 +278,7 @@ fn read_field(text: &str, start: usize, delimiter: u8) -> (Cow<'_, str>, usize) 
     (Cow::Borrowed(&text[start..end]), end)
 }
 
-/// Reads a quoted field whose content starts at `content_start`, just after
-/// the opening quote. `""` inside quotes is one literal quote. Text after the
-/// closing quote, up to the next delimiter or line break, is kept.
+/// Reads a quoted field (`""` is a literal quote); trailing text up to the separator is kept.
 fn read_quoted(text: &str, content_start: usize, delimiter: u8) -> (Cow<'_, str>, usize) {
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -321,7 +288,6 @@ fn read_quoted(text: &str, content_start: usize, delimiter: u8) -> (Cow<'_, str>
 
     let close = loop {
         let Some(offset) = bytes[pos..].iter().position(|&b| b == b'"') else {
-            // Unclosed quote: the field runs to the end of the text.
             break len;
         };
         let quote = pos + offset;
@@ -359,7 +325,6 @@ fn is_field_end(byte: u8, delimiter: u8) -> bool {
     byte == delimiter || byte == b'\n' || byte == b'\r'
 }
 
-/// Appends a cell value on one line: trimmed, with line breaks turned into spaces.
 fn push_one_line(out: &mut String, value: &str) {
     let value = value.trim();
     if value.contains(['\n', '\r']) {
@@ -382,7 +347,6 @@ fn fallback_name(index: usize) -> String {
     format!("column{}", index + 1)
 }
 
-/// Delimiter to prefer on ties: tab for `.tsv`, comma otherwise.
 pub(crate) fn hint_for_path(path: &Path) -> u8 {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("tsv") => b'\t',
@@ -390,8 +354,6 @@ pub(crate) fn hint_for_path(path: &Path) -> u8 {
     }
 }
 
-/// Longest prefix of `text` that is at most `max_bytes` long and ends on a
-/// character boundary.
 pub(crate) fn clip_to_char_boundary(text: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(text.len());
     while !text.is_char_boundary(end) {
@@ -406,7 +368,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A temp file that removes itself on drop.
     struct Fixture(PathBuf);
 
     impl Drop for Fixture {

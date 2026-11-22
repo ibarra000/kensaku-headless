@@ -1,11 +1,5 @@
-//! Facet-count latency harness.
-//!
+//! Facet-count latency (p50/p95 of `compute_facets`) on a synthetic set.
 //! Usage: `cargo run --release --example facet_bench -- <results> [runs]`
-//!
-//! Builds a synthetic matched set with shared parent directories and reports
-//! p50/p95 for [`kensaku_core::search::compute_facets`]. The K12 decision memo
-//! fixed the content tier; this covers the post-ranking facet cost at 100k and
-//! 1M results.
 
 use kensaku_core::search::{MatchType, SearchResult, compute_facets};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -71,7 +65,6 @@ fn main() {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
-    // Warm caches and the allocator.
     let facets = compute_facets(&results, now);
     assert_eq!(facets.all, size);
 

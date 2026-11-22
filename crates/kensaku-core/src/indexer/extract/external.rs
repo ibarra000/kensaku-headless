@@ -1,9 +1,5 @@
-//! Opt-in external text extractors.
-//!
-//! A plugin is an executable configured by the user in `config.json`. Kensaku
-//! never shells out: arguments are passed as separate OS strings, the child's
-//! environment is cleared, stdout is bounded, and the whole process group is
-//! killed on timeout. The default registry is empty.
+//! Opt-in external text extractors: no shell, separate args, cleared env,
+//! bounded stdout, process group killed on timeout.
 
 use crate::config::ExternalExtractor;
 use std::collections::VecDeque;
@@ -17,8 +13,7 @@ use std::time::{Duration, Instant};
 
 use super::DocumentExtract;
 
-/// Upper bound chosen below the extraction layer's 8s watchdog so a plugin
-/// timeout is always handled by this module before its worker is detached.
+/// Below the extraction layer's 8s watchdog so timeouts are handled here first.
 const MAX_TIMEOUT_MS: u64 = 7_000;
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
@@ -30,7 +25,6 @@ fn registry() -> &'static RwLock<Vec<ExternalExtractor>> {
     REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Replaces the process-wide registry. Called when config is loaded or saved.
 pub fn set_extractors(extractors: Vec<ExternalExtractor>) {
     if let Ok(mut guard) = registry().write() {
         *guard = extractors;
@@ -44,8 +38,7 @@ fn failures() -> &'static Mutex<VecDeque<(PathBuf, String)>> {
     FAILURES.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-/// Records the most recent failure reason for Doctor. Bounded so a broken
-/// plugin cannot grow memory during a large crawl.
+/// Records the latest failure for Doctor; bounded.
 pub fn record_failure(path: &Path, reason: &str) {
     let Ok(mut failures) = failures().lock() else {
         return;
@@ -71,7 +64,6 @@ pub fn recent_failures() -> Vec<(PathBuf, String)> {
         .unwrap_or_default()
 }
 
-/// Returns the first enabled extractor matching this path.
 pub fn find(path: &Path) -> Option<ExternalExtractor> {
     let extension = normalized_extension(path);
     let mime = mime_for_extension(extension.as_deref());
@@ -82,8 +74,7 @@ pub fn find(path: &Path) -> Option<ExternalExtractor> {
         .cloned()
 }
 
-/// True when a configured extractor handles this path. Used by the crawler and
-/// watcher to decide whether an otherwise unknown extension needs content work.
+/// True when a configured extractor handles this path.
 pub fn handles(path: &Path) -> bool {
     let extension = normalized_extension(path);
     let mime = mime_for_extension(extension.as_deref());
@@ -95,8 +86,7 @@ pub fn handles(path: &Path) -> bool {
 }
 
 impl ExternalExtractor {
-    /// Validates everything except the `enabled` opt-in. Doctor uses this to
-    /// show the command and catch broken configurations before they run.
+    /// Validates everything except the `enabled` opt-in.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("external extractor has an empty name".to_string());
@@ -161,10 +151,7 @@ impl ExternalExtractor {
         extension_match || mime_match
     }
 
-    /// Runs the plugin and returns extracted text.
-    ///
-    /// The file path is appended as the last argument unless an argument
-    /// contains `{path}`. No shell is involved in either case.
+    /// Runs the plugin; the path is appended last unless an argument contains `{path}`.
     pub fn run(&self, path: &Path, max_bytes: usize) -> Result<DocumentExtract, String> {
         if !self.enabled {
             return Err(format!("external extractor '{}' is disabled", self.name));
@@ -193,8 +180,7 @@ impl ExternalExtractor {
             .stderr(Stdio::null())
             .env_clear();
 
-        // Keep only what a non-interactive program needs to start. User
-        // secrets (daemon tokens, API keys) never reach the plugin.
+        // Minimal env so user secrets never reach the plugin.
         #[cfg(unix)]
         command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
         #[cfg(windows)]
@@ -213,11 +199,9 @@ impl ExternalExtractor {
             command.current_dir(parent);
         }
 
-        // Hide console windows on Windows (external extractors are console apps).
         crate::util::process::hide_console(&mut command);
 
-        // A new process group lets the timeout path kill the plugin *and* any
-        // helpers it spawned, instead of leaving them behind.
+        // Own process group so timeout kills spawned helpers too.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -270,9 +254,7 @@ impl ExternalExtractor {
             }
         };
 
-        // A plugin that exits but leaves a helper holding stdout open must not
-        // pin this extraction slot forever. Wait for the reader only within the
-        // same deadline, then kill the remaining process group.
+        // A helper holding stdout open must not pin the slot; same deadline, then kill the group.
         let reader_timeout = if timed_out {
             Duration::from_millis(250)
         } else {
@@ -413,8 +395,7 @@ fn validate_command(command: &str) -> Result<PathBuf, String> {
     }
     #[cfg(windows)]
     {
-        // Rust can implicitly route .bat/.cmd through cmd.exe. Reject them so
-        // the no-shell guarantee holds on every platform.
+        // Rust may route .bat/.cmd through cmd.exe; reject to keep the no-shell guarantee.
         let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -501,8 +482,7 @@ fn kill_process_group(child: &mut Child) {
     #[cfg(unix)]
     {
         let pid = child.id() as i32;
-        // The child was spawned into its own process group, so the negative
-        // pid reaches helpers too. Fall back to the direct kill below.
+        // Negative pid reaches the whole group; falls back to a direct kill below.
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
         }
@@ -722,8 +702,7 @@ mod tests {
             "a helper holding stdout must not pin the extraction slot"
         );
 
-        // macOS may briefly report a reparented helper as a zombie; the
-        // timeout/no-hang assertions above carry the cross-platform check.
+        // macOS may briefly report a reparented helper as a zombie.
         #[cfg(target_os = "linux")]
         {
             let pid = fs::read_to_string(&pid_file)
@@ -782,8 +761,6 @@ mod tests {
             extractors: vec![extractor(Path::new("/bin/cat"), Vec::new())],
             ..crate::config::KensakuConfig::default()
         };
-        // Round-trip through the same config format users edit, proving a new
-        // format needs no recompile.
         let raw = serde_json::to_string(&config).unwrap();
         let parsed = crate::config::KensakuConfig::load_from_str(&raw);
         assert_eq!(parsed.extractors, config.extractors);

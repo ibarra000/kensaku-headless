@@ -2,9 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-/// Decodes UTF-16 (LE or BE) when the buffer starts with its byte-order mark.
-/// Returns None if there is no UTF-16 BOM or the body is not valid UTF-16, so
-/// the caller can fall back to the other encodings.
+/// Decodes BOM-prefixed UTF-16; None lets the caller fall back to other encodings.
 pub(crate) fn decode_utf16_bom(buffer: &[u8]) -> Option<String> {
     if buffer.len() < 2 {
         return None;
@@ -39,8 +37,7 @@ pub fn extract_text(path: &Path, max_bytes: usize) -> Option<String> {
     })
 }
 
-/// Reuse the existing bounded decoder; markup cleanup needs source indentation
-/// and metadata intact. Ordinary text retains its historical cleanup.
+/// Markup cleanup needs source indentation and metadata intact, so `plain` gates it.
 fn read_text(path: &Path, max_bytes: usize, plain: bool) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut buffer = Vec::new();
@@ -51,26 +48,21 @@ fn read_text(path: &Path, max_bytes: usize, plain: bool) -> Option<String> {
         return None;
     }
 
-    // 1. UTF-16 with a byte-order mark (BOM)
     if let Some(s) = decode_utf16_bom(&buffer) {
         return Some(if plain { clean_text(&s) } else { s });
     }
 
-    // 2. Reject binary files (null bytes in first 1024 bytes)
     if buffer.iter().take(1024).any(|&b| b == 0) {
         return None;
     }
 
-    // 3. UTF-8 decoding
     let raw_text = match String::from_utf8(buffer.clone()) {
         Ok(s) => s,
         Err(_) => {
-            // Lossy fallback if mostly text
             String::from_utf8_lossy(&buffer).to_string()
         }
     };
 
-    // 4. Markdown frontmatter stripping
     if plain {
         Some(clean_text(&strip_markdown_frontmatter(&raw_text)))
     } else {
@@ -89,7 +81,7 @@ pub fn extract_rtf(path: &Path, max_bytes: usize) -> Option<String> {
         return None;
     }
 
-    // Simple RTF text stripper: remove \{ ... \} control groups and \control words
+    // Simple RTF stripper: drop control groups and control words.
     let mut text_out = String::new();
     let mut in_control = false;
     let mut depth = 0;
@@ -150,7 +142,6 @@ fn strip_markdown_frontmatter(text: &str) -> String {
 }
 
 fn clean_text(s: &str) -> String {
-    // Strip BOM and null characters
     s.trim_start_matches('\u{feff}')
         .replace('\0', "")
         .trim()
@@ -164,7 +155,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A temp file that removes itself on drop.
     struct Fixture(PathBuf);
 
     impl Drop for Fixture {
@@ -205,7 +195,6 @@ mod tests {
 
     #[test]
     fn utf16_le_and_be_bom_decode() {
-        // "héllo" in UTF-16, little-endian with BOM.
         let le: Vec<u8> = [0xFF, 0xFE]
             .iter()
             .copied()
@@ -214,7 +203,6 @@ mod tests {
         let fx = bytes_fixture("utf16le", &le);
         assert_eq!(extract_text(&fx.0, 1000).as_deref(), Some("héllo"));
 
-        // Same text big-endian with its own BOM.
         let be: Vec<u8> = [0xFE, 0xFF]
             .iter()
             .copied()
@@ -226,11 +214,10 @@ mod tests {
 
     #[test]
     fn utf16_bom_with_odd_trailing_byte_does_not_panic() {
-        // 3-byte body after the BOM: truncated UTF-16 unit.
+        // Truncated UTF-16 unit after the BOM.
         let truncated: Vec<u8> = [0xFF, 0xFE, b'a', b'\0', b'b'].to_vec();
         let fx = bytes_fixture("utf16odd", &truncated);
-        // Either decodes what it can of the full units or gives up; must not
-        // panic and must not index the raw BOM bytes as text.
+        // Must not panic or index raw BOM bytes.
         let _ = extract_text(&fx.0, 1000);
     }
 
@@ -254,7 +241,6 @@ mod tests {
 
     #[test]
     fn null_bytes_after_1k_are_text_provided_they_are_stripped() {
-        // A large text file with a null byte far beyond the probe window.
         let padding = "x".repeat(1024);
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(padding.as_bytes()); // fills the probe window
@@ -288,8 +274,7 @@ mod tests {
 
     #[test]
     fn markdown_without_closing_frontmatter_is_text() {
-        // A document that starts with --- but never closes it is NOT
-        // frontmatter; dropping its content would lose real words.
+        // An unclosed `---` is not frontmatter; its content must be kept.
         let fx = bytes_fixture("front-open", b"---\ntitle: no closing marker here\nmore\n");
         let text = extract_text(&fx.0, 1000).expect("kept as body");
         assert!(text.contains("no closing marker"), "got: {text:?}");

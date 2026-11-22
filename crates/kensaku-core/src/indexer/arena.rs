@@ -195,8 +195,7 @@ impl NodeArena {
         p
     }
 
-    /// Compares an arena node's reconstructed path with `path` without
-    /// allocating a `PathBuf`.
+    /// Compares a node's path with `path` without allocating.
     pub fn path_eq(&self, idx: u32, path: &Path) -> bool {
         let components: Vec<&std::ffi::OsStr> = path
             .components()
@@ -231,7 +230,6 @@ impl NodeArena {
         position == 0
     }
 
-    /// Reconstruct parent index if needed (already stored).
     pub fn parent(&self, idx: u32) -> NodeId {
         self.nodes[idx as usize].parent
     }
@@ -472,8 +470,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    // ── NameArena ─────────────────────────────────────────────────────────────
-
     #[test]
     fn name_arena_push_and_get_round_trips() {
         let mut a = NameArena::new();
@@ -481,7 +477,6 @@ mod tests {
         assert_eq!(a.get(off, len), "hello");
         let (off2, len2) = a.push("world");
         assert_eq!(a.get(off2, len2), "world");
-        // First entry must still be intact.
         assert_eq!(a.get(off, len), "hello");
     }
 
@@ -507,8 +502,6 @@ mod tests {
         let (off, len) = a.push(s);
         assert_eq!(a.get(off, len), s);
     }
-
-    // ── NodeArena ─────────────────────────────────────────────────────────────
 
     fn node(parent: NodeId, name: &str, is_dir: bool, arena: &mut NodeArena) -> u32 {
         let (name_off, name_len) = arena.names.push(name);
@@ -592,7 +585,6 @@ mod tests {
         let id3 = arena.intern_ext(Some("toml"));
         assert_eq!(id1, id2, "same extension must get same id");
         assert_ne!(id1, id3);
-        // No extension → id 0.
         assert_eq!(arena.intern_ext(None), 0);
         assert_eq!(arena.intern_ext(Some("")), 0);
     }
@@ -619,8 +611,6 @@ mod tests {
         assert_eq!(arena.ext_str(rs_id), "rs");
         assert_eq!(arena.ext_str(0), "");
     }
-
-    // ── IdIndex ───────────────────────────────────────────────────────────────
 
     #[test]
     fn id_index_insert_get_remove() {
@@ -658,8 +648,6 @@ mod tests {
         assert_eq!(idx.get(20), Some(2));
         assert_eq!(idx.get(30), Some(3));
     }
-
-    // ── PathIndex ─────────────────────────────────────────────────────────────
 
     #[test]
     fn path_index_insert_find_remove() {

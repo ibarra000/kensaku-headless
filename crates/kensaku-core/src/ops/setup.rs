@@ -1,35 +1,30 @@
-//! First-run setup and folder management without a wizard.
-
+//! First-run setup and folder management.
 use crate::config::KensakuConfig;
 use crate::indexer::IndexerManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// OCR engines accepted by [`complete_setup`].
 const OCR_ENGINES: [&str; 3] = [crate::ocr::TESSERACT, crate::ocr::ACCURATE, crate::ocr::INDRA];
 
-/// Folders shown as suggestions on first run.
 const SUGGESTED_HOME_FOLDERS: [&str; 4] = ["Documents", "Downloads", "Desktop", "Pictures"];
 
-/// Everything first-run setup needs. Paths are validated with
-/// [`validate_directory`] before they are stored.
+/// First-run setup input; paths go through [`validate_directory`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetupRequest {
-    /// Folders to index fully (names + content).
+    /// Folders indexed fully (names + content).
     pub watched_dirs: Vec<String>,
-    /// Folders indexed by name only. `None` keeps the current list.
+    /// Name-only folders; `None` keeps the current list.
     #[serde(default)]
     pub name_only_dirs: Option<Vec<String>>,
-    /// Exclusion patterns/paths.
     #[serde(default)]
     pub excluded_dirs: Vec<String>,
-    /// `tesseract`, `accurate` or `indra`. `None` keeps the current engine.
+    /// `tesseract`, `accurate` or `indra`; `None` keeps the current engine.
     #[serde(default)]
     pub ocr_engine: Option<String>,
 }
 
-/// Existing common folders under the home directory. Never includes home itself.
+/// Existing common folders under home (never home itself).
 pub fn suggested_directories() -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
@@ -42,10 +37,7 @@ pub fn suggested_directories() -> Vec<String> {
         .collect()
 }
 
-/// Validates a user-typed folder path and returns its canonical form.
-///
-/// Accepts `~` expansion, quoted paths and stray whitespace, and refuses
-/// anything that is not an existing directory.
+/// Canonicalizes a user-typed directory (`~`, quotes, whitespace); rejects non-directories.
 pub fn validate_directory(path: &str) -> Result<String, String> {
     let trimmed = path.trim().trim_matches('"').trim();
     let resolved = if trimmed == "~" {
@@ -72,8 +64,7 @@ pub fn validate_directory(path: &str) -> Result<String, String> {
         .map_err(|e| format!("Could not resolve {}: {}", candidate.display(), e))?
         .to_string_lossy()
         .to_string();
-    // Windows canonicalize() returns an extended-length path (\\?\C:\...);
-    // everything else expects the plain form.
+    // Strip Windows' `\?\` extended-length prefix from canonicalize().
     Ok(canonical
         .strip_prefix("\\\\?\\")
         .map(str::to_string)
@@ -87,7 +78,7 @@ fn validate_all(paths: &[String]) -> Result<Vec<PathBuf>, String> {
         .collect()
 }
 
-/// Builds the post-setup config from `current` and `req` without touching disk.
+/// Builds the post-setup config without touching disk.
 pub fn setup_config(current: &KensakuConfig, req: &SetupRequest) -> Result<KensakuConfig, String> {
     if req.watched_dirs.is_empty() {
         return Err("Setup needs at least one folder to index".to_string());
@@ -112,7 +103,7 @@ pub fn setup_config(current: &KensakuConfig, req: &SetupRequest) -> Result<Kensa
     Ok(config)
 }
 
-/// Saves the setup choices and starts the first crawl on the writer.
+/// Saves setup choices and starts the first crawl.
 pub fn complete_setup(
     indexer: &Arc<IndexerManager>,
     req: &SetupRequest,
@@ -125,7 +116,7 @@ pub fn complete_setup(
     Ok(config)
 }
 
-/// Marks setup incomplete so the next `setup` call starts fresh.
+/// Marks setup incomplete so the next `setup` starts fresh.
 pub fn run_setup_again(indexer: &IndexerManager) -> Result<(), String> {
     indexer.request_cancel();
     let mut config = indexer.config.write();

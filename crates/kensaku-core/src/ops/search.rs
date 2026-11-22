@@ -1,21 +1,17 @@
-//! Snippet retrieval for search results.
-//!
-//! Search itself is `IndexerManager::search_page` (see `api::dispatch`).
+//! Snippet retrieval; search itself is `IndexerManager::search_page` (see `api::dispatch`).
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Snippet payload fetched in a second round-trip after search results render.
+/// Snippets fetched in a second round-trip after results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnippetDto {
     pub path: String,
     pub snippet: Option<String>,
 }
 
-/// Longest snippet returned to the frontend.
 const MAX_SNIPPET_CHARS: usize = 499;
 
-/// Upper bound on paths accepted by a single `get_snippets` call.
 const MAX_SNIPPET_PATHS: usize = 50;
 
 pub fn compute_snippets(paths: Vec<String>, query: &str) -> Vec<SnippetDto> {

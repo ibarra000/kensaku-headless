@@ -1,24 +1,5 @@
-//! `.gitignore` / `.cursorignore` parity for the index.
-//!
-//! Agents assume the index matches what a developer sees: files a repo
-//! ignores should not surface as search results. This module parses the
-//! gitignore-format files (`.gitignore`, `.cursorignore`, and
-//! `.kensakuignore`) found under the watched roots and answers one question:
-//! is this path ignored?
-//!
-//! Scope and honesty notes:
-//!
-//! - This is a **matching-parity subset**, not a full gitignore engine: the
-//!   common syntax is supported (`*`, `?`, `**`, character ranges, anchored
-//!   patterns, directory-only patterns, negation, comments). Exotic edge
-//!   cases (escaped trailing spaces, nested attributes files) are not.
-//! - Rules are applied **after** the walk, not during traversal: ignored
-//!   directories are still traversed (the default `excluded_dirs` list
-//!   already keeps the big ones like `node_modules` out), but their files
-//!   never reach the index.
-//! - Precedence follows git: once a parent directory is excluded, nothing
-//!   under it can be re-included; for the path itself, the deepest
-//!   applicable rule wins, later lines win within a file, and `!` negates.
+//! `.gitignore`/`.cursorignore`/`.kensakuignore` matching (common-syntax subset), applied
+//! after the walk with git precedence: excluded parents cannot be re-included.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -28,38 +9,28 @@ pub const IGNORE_FILE_NAMES: &[&str] = &[".gitignore", ".cursorignore", ".kensak
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rule {
-    /// Raw pattern text without leading `!` or trailing `/`.
     pattern: String,
     negated: bool,
-    /// Pattern ended with `/`: matches directories only.
     dir_only: bool,
-    /// Pattern contains a `/` (other than a trailing one): match relative to
-    /// the defining directory instead of any basename.
+    /// Contains an interior `/`: match relative to the defining directory, not any basename.
     anchored: bool,
 }
 
-/// Parsed ignore rules grouped by the directory that defines them.
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreSet {
     rules: BTreeMap<PathBuf, Vec<Rule>>,
     case_insensitive: bool,
 }
 
-/// The rules from the most recent crawl, for code that runs between crawls.
-///
-/// The watcher used to apply no ignore rules at all, so touching anything
-/// under `dist/`, `.venv/` or a `.cursorignore` entry indexed it and the next
-/// crawl dropped it again: the index flip-flopped on every build.
+/// Rules from the latest crawl, so the watcher agrees with the crawler.
 static ACTIVE: std::sync::RwLock<Option<IgnoreSet>> = std::sync::RwLock::new(None);
 
-/// Publishes the rules the crawler just used, so the watcher agrees with it.
 pub fn set_active(set: IgnoreSet) {
     if let Ok(mut slot) = ACTIVE.write() {
         *slot = Some(set);
     }
 }
 
-/// Whether the current crawl's ignore rules exclude `path`.
 pub fn is_active_ignored(path: &Path, is_dir: bool) -> bool {
     ACTIVE
         .read()
@@ -69,7 +40,6 @@ pub fn is_active_ignored(path: &Path, is_dir: bool) -> bool {
 }
 
 impl IgnoreSet {
-    /// Empty set: nothing is ignored.
     pub fn empty() -> Self {
         Self {
             rules: BTreeMap::new(),
@@ -77,10 +47,7 @@ impl IgnoreSet {
         }
     }
 
-    /// Scans `dirs` (candidate directories, usually the walker's output,
-    /// which is already in memory) for ignore files. The ignore files
-    /// themselves are hidden entries, so they are probed on disk rather than
-    /// read from the entry list.
+    /// Probes `dirs` on disk for ignore files (they are hidden, so not in the entry list).
     pub fn from_directories(dirs: &[PathBuf]) -> Self {
         let mut set = Self::empty();
         for dir in dirs {
@@ -104,13 +71,11 @@ impl IgnoreSet {
         self.rules.is_empty()
     }
 
-    /// True when `path` is ignored. `is_dir` reflects the entry's type.
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
         if self.rules.is_empty() {
             return false;
         }
-        // Applicable rule groups, ordered shallow → deep so deeper files
-        // override shallower ones.
+        // Shallow → deep so deeper files override shallower ones.
         let mut applicable: Vec<(&Path, &[Rule])> = self
             .rules
             .iter()
@@ -140,9 +105,7 @@ impl IgnoreSet {
                 continue;
             }
 
-            // Parent directories: if any parent prefix is ignored (as a
-            // directory), the whole subtree is ignored and cannot be
-            // re-included (git semantics).
+            // An ignored parent directory ignores the subtree (no re-include, per git).
             for depth in 1..components.len() {
                 let prefix = components[..depth].join("/");
                 if self.evaluate(rules, &prefix, true) {
@@ -150,8 +113,7 @@ impl IgnoreSet {
                 }
             }
 
-            // The path itself: last matching rule wins, and deeper groups
-            // override shallower ones.
+            // The path itself: last matching rule wins, deeper groups override.
             let full = components.join("/");
             if let Some(decision) = self.evaluate_last(rules, &full, is_dir) {
                 ignored = decision;
@@ -160,8 +122,6 @@ impl IgnoreSet {
         ignored
     }
 
-    /// Returns the decision of the last matching rule, or `None` when no rule
-    /// matches.
     fn evaluate_last(&self, rules: &[Rule], relative: &str, is_dir: bool) -> Option<bool> {
         let mut decision = None;
         for rule in rules {
@@ -172,8 +132,7 @@ impl IgnoreSet {
         decision
     }
 
-    /// True when any rule matches (used for parent prefixes, where git says
-    /// an excluded directory cannot be re-included from below).
+    /// True when any rule matches (for parent prefixes).
     fn evaluate(&self, rules: &[Rule], relative: &str, is_dir: bool) -> bool {
         rules
             .iter()
@@ -182,13 +141,11 @@ impl IgnoreSet {
 
     fn rule_matches(&self, rule: &Rule, relative: &str, is_dir: bool) -> bool {
         if rule.dir_only && !is_dir && !relative.contains('/') {
-            // A dir-only pattern never matches a file by its own basename…
             return false;
         }
         let candidate: Cow<'_, str> = if rule.anchored {
             Cow::Borrowed(relative)
         } else {
-            // Unanchored patterns match the basename at any depth.
             Cow::Owned(relative.rsplit('/').next().unwrap_or(relative).to_string())
         };
         glob_match(&rule.pattern, &candidate)
@@ -210,7 +167,6 @@ fn parse(raw: &str) -> Vec<Rule> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Unescaped trailing whitespace is not significant.
         let line = line.trim_end_matches([' ', '\t']);
         if line.is_empty() {
             continue;
@@ -226,9 +182,7 @@ fn parse(raw: &str) -> Vec<Rule> {
             Some(rest) => (rest.to_string(), true),
             None => (pattern, false),
         };
-        // A leading slash anchors the pattern and is not part of the match.
-        // A pattern like `foo/**/` keeps its interior slash after the
-        // trailing one is stripped, so anchoring stays correct.
+        // A leading slash anchors and is stripped; `foo/**/` keeps its interior slash.
         let anchored = pattern.contains('/');
         let pattern = pattern.strip_prefix('/').unwrap_or(&pattern).to_string();
         rules.push(Rule {
@@ -241,10 +195,7 @@ fn parse(raw: &str) -> Vec<Rule> {
     rules
 }
 
-/// gitignore-flavored glob match over one candidate string.
-///
-/// `*` matches any run without `/`, `?` one non-`/` character, `**` any run
-/// including separators, and `[a-z]` / `[!a-z]` are character classes.
+/// gitignore-flavored glob: `*`, `?`, `**` (crosses `/`), `[a-z]`/`[!a-z]`.
 fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
@@ -258,7 +209,6 @@ fn glob_impl(p: &[char], t: &[char]) -> bool {
     match head {
         '*' => {
             if rest.first() == Some(&'*') {
-                // `**`: crosses separators. A following `/` is swallowed so
                 // `**/x` also matches `x`.
                 let after = if rest.get(1) == Some(&'/') {
                     &rest[2..]
@@ -267,7 +217,6 @@ fn glob_impl(p: &[char], t: &[char]) -> bool {
                 };
                 (0..=t.len()).any(|i| glob_impl(after, &t[i..]))
             } else {
-                // `*`: any run without `/`.
                 (0..=t.len())
                     .take_while(|&i| !t[..i].contains(&'/'))
                     .any(|i| glob_impl(rest, &t[i..]))
@@ -284,7 +233,6 @@ fn glob_impl(p: &[char], t: &[char]) -> bool {
             match match_class(p, 0, first) {
                 Some((matched, next)) if matched => glob_impl(&p[next..], tail),
                 Some((_, _)) => false,
-                // Unterminated class: `[` is a literal.
                 None => t[0] == '[' && glob_impl(rest, tail),
             }
         }
@@ -292,9 +240,7 @@ fn glob_impl(p: &[char], t: &[char]) -> bool {
     }
 }
 
-/// Matches a `[...]` class starting at `p[start]`. Returns whether the
-/// character matched and the index just past the class, or `None` when the
-/// class is unterminated.
+/// Matches a `[...]` class at `p[start]`: (matched, index past class), or None if unterminated.
 fn match_class(p: &[char], start: usize, ch: char) -> Option<(bool, usize)> {
     let mut i = start + 1;
     let negated = matches!(p.get(i), Some('!') | Some('^'));
@@ -381,8 +327,6 @@ mod tests {
 
         assert!(set.is_ignored(&dir.join("logs"), true));
         assert!(!set.is_ignored(&dir.join("logs.txt"), false));
-        // Files under an ignored directory are ignored via the parent rule;
-        // they cannot be re-included.
         assert!(set.is_ignored(&dir.join("logs/x.txt"), false));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -395,7 +339,6 @@ mod tests {
 
         assert!(set.is_ignored(&dir.join("debug.log"), false));
         assert!(!set.is_ignored(&dir.join("important.log"), false));
-        // The later line re-ignores what an earlier line un-ignored.
         assert!(set.is_ignored(&dir.join("keep"), true));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -407,11 +350,9 @@ mod tests {
         let subdir = dir.join("sub");
         fs::create_dir_all(&subdir).unwrap();
         write_ignore(&subdir, ".gitignore", "!secrets/\n");
-        // The walker probes every visited directory, so both are passed in.
         let set = IgnoreSet::from_directories(&[dir.clone(), subdir.clone()]);
 
         assert!(set.is_ignored(&dir.join("secrets"), true));
-        // The deeper un-ignore wins for the nested path itself.
         assert!(!set.is_ignored(&subdir.join("secrets"), true));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -493,7 +434,6 @@ mod tests {
     #[test]
     fn parent_directory_exclusion_cannot_be_reincluded() {
         let dir = temp("parent_reinclude");
-        // Git rule: if a parent directory is excluded, child files cannot re-include themselves
         write_ignore(
             &dir,
             ".gitignore",
@@ -514,7 +454,6 @@ mod tests {
     #[test]
     fn pattern_trailing_whitespace_is_trimmed() {
         let dir = temp("whitespace_trim");
-        // Lines with spaces or tabs after pattern
         write_ignore(
             &dir,
             ".gitignore",
@@ -549,7 +488,6 @@ unterminated_[abc
         assert!(!set.is_ignored(&dir.join("alpha_1.txt"), false));
         assert!(set.is_ignored(&dir.join("non_num_x.bin"), false));
         assert!(!set.is_ignored(&dir.join("non_num_5.bin"), false));
-        // Unterminated bracket class matches literal '['
         assert!(set.is_ignored(&dir.join("unterminated_[abc"), false));
         fs::remove_dir_all(&dir).unwrap();
     }

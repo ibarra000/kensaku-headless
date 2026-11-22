@@ -1,8 +1,5 @@
-//! The method table: maps every [`super::METHODS`] entry to an operation on a
-//! live, writable [`IndexerManager`].
-//!
-//! Used verbatim by the daemon (JSON-RPC), the HTTP `/v1` routes (via the
-//! daemon) and the in-process [`super::Engine`].
+//! Method table: maps every [`super::METHODS`] entry onto a live [`IndexerManager`].
+//! Shared by the daemon (and thus HTTP `/v1`) and the in-process [`super::Engine`].
 
 use super::error::{ApiError, ErrorCode};
 use crate::config::KensakuConfig;
@@ -13,17 +10,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Serializes read-modify-write config changes so concurrent calls cannot
-/// lose each other's updates.
+/// Serializes read-modify-write config changes so concurrent updates aren't lost.
 static CONFIG_MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// API protocol version reported by `ping`/`health`.
 pub const API_VERSION: u64 = crate::daemon::PROTOCOL_VERSION;
 
-/// Executes `method` against `indexer`.
-///
-/// `reset` and `shutdown` only perform their side effects here (writing the
-/// reset marker); stopping the process is the transport's job.
+/// Executes `method`. `reset`/`shutdown` only write markers here; stopping the process is the transport's job.
 pub fn dispatch(
     indexer: &Arc<IndexerManager>,
     method: &str,
@@ -178,9 +170,7 @@ pub fn dispatch(
         }
         "rescan" => {
             require_setup(indexer)?;
-            // Pick up config edited on disk, then wait out a finishing crawl
-            // instead of hitting its running gate. A broken file is an error,
-            // never silently replaced by defaults.
+            // Reload config from disk (a broken file is an error, never defaults), then wait out a finishing crawl.
             let on_disk = KensakuConfig::try_load().map_err(ApiError::invalid)?;
             let _guard = config_lock();
             indexer.apply_config(on_disk)?;
@@ -292,9 +282,7 @@ fn config_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Saves `config`. When the crawl scope changed, also queues a crawl that
-/// waits out one already running (`apply_config` alone would hit the
-/// running gate and silently skip the new roots).
+/// Saves `config`; on scope change queues a crawl that waits out a running one (else new roots are skipped).
 fn apply_config(indexer: &Arc<IndexerManager>, config: KensakuConfig) -> Result<Value, ApiError> {
     let scope_changed = {
         let current = indexer.config.read();
@@ -325,7 +313,7 @@ fn validated_roots(mut config: KensakuConfig) -> Result<KensakuConfig, ApiError>
     Ok(config)
 }
 
-/// Overlays the keys of `patch` onto `current` (top level only).
+/// Overlays top-level keys of `patch` onto `current`.
 pub fn patch_config(current: &KensakuConfig, patch: &Value) -> Result<KensakuConfig, ApiError> {
     let mut merged = serde_json::to_value(current).map_err(|e| ApiError::internal(e.to_string()))?;
     let (Some(target), Some(source)) = (merged.as_object_mut(), patch.as_object()) else {
@@ -394,8 +382,7 @@ fn search(indexer: &IndexerManager, params: &Value) -> Result<Value, ApiError> {
 fn read_snippet(indexer: &IndexerManager, params: &Value) -> Result<Value, ApiError> {
     let path = req_str(params, "path")?;
     let allowed = {
-        // Reachable by every local agent client: enforce the same scope and
-        // denylist rules as the in-process agent path.
+        // Reachable by every local agent client: enforce agent scope and denylist.
         let cfg = indexer.config.read();
         crate::agent::agent_read_allowed(&cfg.agent_scoped_roots, &cfg.excluded_extensions, path)
     };
@@ -423,7 +410,7 @@ fn read_snippet(indexer: &IndexerManager, params: &Value) -> Result<Value, ApiEr
     }))
 }
 
-/// Whether `path` is part of the index, by exact spelling or canonical form.
+/// Whether `path` is indexed, by exact spelling or canonical form.
 pub fn is_indexed(indexer: &IndexerManager, path: &str) -> bool {
     let requested = Path::new(path);
     let metadata = indexer.metadata.read();
@@ -469,7 +456,6 @@ fn packs_status() -> Value {
     })
 }
 
-/// Pack names accepted by `pack_download`.
 pub const PACKS: [&str; 6] = ["models", "ocr", "indra", "smart", "visual", "tessdata"];
 
 fn pack_download(pack: &str) -> Result<(), ApiError> {
@@ -535,9 +521,7 @@ mod tests {
 
     #[test]
     fn every_registered_method_is_dispatched() {
-        // Calling an unknown name yields MethodNotFound; every registered
-        // method must produce something else. Use a read-only manager so the
-        // test never crawls or writes, and skip methods with side effects.
+        // Every registered method must not yield MethodNotFound; read-only manager, side-effect methods skipped.
         let indexer = Arc::new(IndexerManager::new_readonly(KensakuConfig::default()));
         let side_effects = [
             "save_config",

@@ -1,8 +1,6 @@
 use std::process::Command;
 
-/// Prevents a console window from flashing on screen when spawning a
-/// console application (tesseract, pdftoppm, external extractors) on
-/// Windows. On other platforms this is a no-op.
+/// Hides the console window flash for spawned console apps on Windows.
 pub fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     {

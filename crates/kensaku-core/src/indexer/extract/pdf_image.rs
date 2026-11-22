@@ -1,40 +1,16 @@
-//! Decodes the images embedded in a PDF so scanned pages can be OCR'd.
-//!
-//! A PDF image XObject is not an image file. Its stream holds either a
-//! complete JPEG (`DCTDecode`), or raw pixel rows behind lossless filters
-//! (`FlateDecode`, `LZWDecode`, ...) whose layout is described only by the
-//! dictionary: `Width`, `Height`, `BitsPerComponent`, `ColorSpace`, `Decode`.
-//! `image::load_from_memory` on `decompressed_content()` therefore fails for
-//! both: lopdf refuses to "decompress" a JPEG, and raw rows have no header.
-//! This module handles both shapes, which together cover almost every
-//! scanner and phone-scan app.
-//!
-//! Not supported (returned as `Err` with a reason so callers can log it):
-//! `JPXDecode` (JPEG 2000), `CCITTFaxDecode`, `JBIG2Decode`, `Indexed` and
-//! other exotic colour spaces, and bit depths other than 1 and 8.
+//! Decodes PDF image XObjects (JPEG via `DCTDecode` or raw filtered rows) for OCR.
+//! Unsupported: JPX, CCITT, JBIG2, Indexed/exotic colour spaces, depths other than 1/8.
 
 use image::{DynamicImage, GrayImage, RgbImage};
 use lopdf::{Document, Object, Stream};
 
-/// Images above this many pixels are skipped; matches the image decoder's
-/// 50 MP budget so a hostile PDF cannot allocate an unbounded buffer.
+/// Pixel cap matching the image decoder's 50 MP budget.
 pub const MAX_PDF_IMAGE_PIXELS: u64 = 50_000_000;
 
-/// Images smaller than this on either side are logos, bullets or icons, not
-/// scanned pages. Skipping them saves OCR time and noise.
+/// Smaller sides are logos/icons, not scanned pages.
 pub const MIN_PDF_IMAGE_SIDE: u32 = 64;
 
-/// Streams the embedded raster images of every page, in page order.
-///
-/// `on_image` receives each page as soon as it is decoded and returns whether
-/// to keep going. Collecting them first (the old `page_images`) decoded every
-/// page into memory before any OCR ran: twenty 50 MP pages is about 3 GB
-/// resident, which is a machine-dependent crash on exactly the documents OCR
-/// exists for. Decoding one page at a time caps peak memory at one page.
-///
-/// Images are deduplicated by object id (a logo repeated on every page is
-/// decoded once) and capped at `max_images`. Undecodable images are reported
-/// through `on_skip` with a reason instead of being dropped silently.
+/// Streams decoded page images one at a time (caps peak memory), deduped by object id; skips go to `on_skip`.
 pub fn for_each_page_image(
     doc: &Document,
     max_images: usize,
@@ -57,9 +33,7 @@ pub fn for_each_page_image(
             let Ok(stream) = doc.get_object(pdf_image.id).and_then(Object::as_stream) else {
                 continue;
             };
-            // Reserve the decoded size before the decoder allocates it. The
-            // permit travels with the image, so the reservation covers OCR and
-            // is released as soon as the page is dropped.
+            // Reserve the decoded size before allocating; the permit lives until the page is dropped.
             let width = dict_u32(doc, &stream.dict, b"Width");
             let height = dict_u32(doc, &stream.dict, b"Height");
             let (Some(width), Some(height)) = (width, height) else {
@@ -71,7 +45,6 @@ pub fn for_each_page_image(
             match decode_image_stream(doc, stream) {
                 Ok(image) => {
                     emitted += 1;
-                    // Dropped by the caller before the next decode.
                     if !on_image(image, permit) {
                         return;
                     }
@@ -82,16 +55,14 @@ pub fn for_each_page_image(
     }
 }
 
-/// Collected form of [`for_each_page_image`], for tests and callers that do
-/// want every page at once.
+/// Collected form of [`for_each_page_image`].
 pub fn page_images(
     doc: &Document,
     max_images: usize,
     mut on_skip: impl FnMut(String),
 ) -> Vec<DynamicImage> {
     let mut out = Vec::new();
-    // Collected pages are not charged to the budget: this form exists for
-    // tests and tooling. Production OCR uses `for_each_page_image`.
+    // Not charged to the budget: tests and tooling only.
     for_each_page_image(doc, max_images, &mut on_skip, |image, _reserved| {
         out.push(image);
         true
@@ -99,7 +70,6 @@ pub fn page_images(
     out
 }
 
-/// Decodes one image XObject stream into pixels.
 pub fn decode_image_stream(doc: &Document, stream: &Stream) -> Result<DynamicImage, String> {
     let dict = &stream.dict;
     let width = dict_u32(doc, dict, b"Width").ok_or("missing Width")?;
@@ -123,7 +93,6 @@ pub fn decode_image_stream(doc: &Document, stream: &Stream) -> Result<DynamicIma
         .map(|f| f.into_iter().map(<[u8]>::to_vec).collect())
         .unwrap_or_default();
 
-    // Terminal image codecs. Anything before them is a lossless wrapper.
     let terminal = filters.last().map(Vec::as_slice);
     match terminal {
         Some(b"DCTDecode") | Some(b"DCT") => {
@@ -140,7 +109,6 @@ pub fn decode_image_stream(doc: &Document, stream: &Stream) -> Result<DynamicIma
         _ => {}
     }
 
-    // Raw pixel rows.
     let max_bytes = (u64::from(width) * u64::from(height) * 4) as usize + 1024;
     let data = stream
         .decompressed_content_with_limit(max_bytes)
@@ -159,8 +127,7 @@ pub fn decode_image_stream(doc: &Document, stream: &Stream) -> Result<DynamicIma
     raw_to_image(&data, width, height, bpc, components, inverted)
 }
 
-/// Strips the lossless filters in front of a terminal codec, returning the
-/// codec's input bytes (e.g. the JPEG file inside `[/FlateDecode /DCTDecode]`).
+/// Strips lossless filters before a terminal codec, returning the codec's input.
 fn unwrap_prefix_filters(stream: &Stream, filters: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     if filters.len() <= 1 {
         return Ok(stream.content.clone());
@@ -188,10 +155,9 @@ fn dict_u32(doc: &Document, dict: &lopdf::Dictionary, key: &[u8]) -> Option<u32>
     u32::try_from(value).ok()
 }
 
-/// Number of colour components for the supported colour spaces.
 fn color_components(doc: &Document, space: Option<&Object>) -> Result<u32, String> {
     let Some(space) = space else {
-        // Required for non-mask images, but be lenient: assume grey.
+        // Required for non-mask images; assume grey.
         return Ok(1);
     };
     match resolve(doc, space) {
@@ -293,7 +259,7 @@ fn raw_to_image(
                 .ok_or_else(|| "CMYK buffer size mismatch".into())
         }
         (1, 1) => {
-            // Rows are padded to whole bytes. 1 = white unless inverted.
+            // Rows are padded to whole bytes; 1 = white unless inverted.
             let stride = w.div_ceil(8);
             let packed = take(data, stride * h)?;
             let mut pixels = Vec::with_capacity(w * h);
@@ -325,7 +291,6 @@ mod tests {
     use super::*;
     use lopdf::{Dictionary, Stream, dictionary};
 
-    /// Builds a one-page PDF whose page draws a single image XObject.
     fn pdf_with_image(image_dict: Dictionary, content: Vec<u8>) -> Document {
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
@@ -383,8 +348,7 @@ mod tests {
 
     #[test]
     fn jpeg_scans_are_decoded_not_skipped() {
-        // lopdf refuses to "decompress" DCTDecode; the old path skipped every
-        // JPEG scan, which is most scanners and phone-scan apps.
+        // lopdf refuses to "decompress" DCTDecode.
         let source = image::RgbImage::from_fn(120, 80, |x, _| image::Rgb([x as u8, 40, 200]));
         let mut jpeg = Vec::new();
         image::DynamicImage::ImageRgb8(source)
@@ -403,8 +367,7 @@ mod tests {
 
     #[test]
     fn flate_rgb_and_gray_rows_are_rebuilt_from_the_dictionary() {
-        // The old path fed raw rows to `load_from_memory`, which needs a file
-        // header, so every Flate scan was skipped too.
+        // `load_from_memory` cannot read headerless raw rows.
         let (w, h) = (100usize, 70usize);
         let rgb: Vec<u8> = (0..w * h).flat_map(|i| [i as u8, 0, 255]).collect();
         let mut dict = base(w as i64, h as i64);

@@ -1,9 +1,4 @@
-//! Best-effort return of freed heap pages to the OS.
-//!
-//! Long extractions (images, PDFs, Office documents) can leave large freed
-//! allocations in the process allocator. Calling this after each unit of work
-//! keeps the daemon's resident set close to its baseline. It is always a no-op
-//! on unsupported targets and never fails.
+//! Best-effort return of freed heap pages to the OS; no-op where unsupported.
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn release_memory() {
@@ -14,9 +9,7 @@ pub fn release_memory() {
 
 #[cfg(target_os = "macos")]
 pub fn release_memory() {
-    // `malloc_zone_pressure_relief` is declared in <malloc/malloc.h>, not in
-    // the libc crate's macOS bindings. Declare the two symbols directly so the
-    // universal macOS build links without a C shim.
+    // Not in libc's macOS bindings; declared here to avoid a C shim.
     unsafe extern "C" {
         fn malloc_zone_pressure_relief(zone: *mut core::ffi::c_void, goal: usize) -> usize;
         fn malloc_default_zone() -> *mut core::ffi::c_void;

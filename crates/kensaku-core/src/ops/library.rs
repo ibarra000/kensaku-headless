@@ -6,10 +6,8 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuplicateGroup {
-    /// `"content"` for exact extracted-content matches, `"image"` for
-    /// perceptual-hash matches.
+    /// `"content"` (exact content match) or `"image"` (perceptual hash).
     pub kind: String,
-    /// Hex content hash or perceptual hash identifying the group.
     pub hash: String,
     pub paths: Vec<String>,
 }
@@ -44,8 +42,7 @@ pub fn duplicates_for(
         });
     }
 
-    // Screenshot bursts are the primary version grouping. A near-duplicate
-    // group covering exactly the same paths would be redundant.
+    // Screenshot bursts group first; a near-duplicate group with the same paths would be redundant.
     for (look, paths) in db.burst_duplicate_groups(limit)? {
         if !seen.insert(group_key(&paths)) {
             continue;
@@ -78,9 +75,8 @@ pub struct HomeItem {
     pub size: u64,
     pub modified: u64,
     pub is_dir: bool,
-    /// Last time the file was opened through Kensaku (0 = never).
+    /// Last open through Kensaku (0 = never).
     pub last_open: u64,
-    /// Total opens through Kensaku.
     pub opens: u32,
 }
 
@@ -112,12 +108,7 @@ pub fn home_data_for(indexer: &crate::indexer::IndexerManager) -> Result<HomeDat
             })
         })
         .collect();
-    // "Recent" means last touched: opening a file through Kensaku counts
-    // (that timestamp lives in `last_open`), otherwise its on-disk modified
-    // time. Sort by the later of the two, opens as a secondary signal, and
-    // the path as the deterministic tie-break — files generated in one batch
-    // share timestamps, and without it the tail of the list would reshuffle
-    // on every refetch.
+    // Recent = max(last_open, modified), then opens, then path as a stable tie-break (batch files share timestamps).
     let touched = |item: &HomeItem| item.last_open.max(item.modified);
     recent.sort_by(|a, b| {
         touched(b)
@@ -185,7 +176,7 @@ pub fn toggle_pin_for(
     Ok(pinned)
 }
 
-/// Directory suggestions for the `@` scope menu, derived from indexed dirs.
+/// `@` scope menu suggestions from indexed dirs.
 pub fn scope_suggestions_for(
     indexer: &crate::indexer::IndexerManager,
     prefix: Option<String>,
@@ -225,7 +216,7 @@ pub fn scope_suggestions_for(
         .collect())
 }
 
-/// Images visually similar to `path` (empty unless a visual encoder exists).
+/// Empty unless a visual encoder exists.
 pub fn similar_images(
     indexer: &IndexerManager,
     path: &str,

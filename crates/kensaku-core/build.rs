@@ -1,6 +1,5 @@
 fn main() {
-    // Copy an ONNX Runtime library staged in this crate to the target directories
-    // so tests and debug builds can find and load it without manual setup.
+    // Copy a staged ONNX Runtime library next to targets so tests/debug builds can load it.
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
 

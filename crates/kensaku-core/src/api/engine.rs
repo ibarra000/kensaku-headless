@@ -6,12 +6,7 @@ use crate::runtime::{Runtime, StartError};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Owns the index inside the calling process.
-///
-/// Takes the same writer lock as the daemon, so an `Engine` and a daemon for
-/// the same data directory cannot run together. The data directory is
-/// `KENSAKU_DATA_DIR` or the platform default.
-///
+/// In-process index owner; takes the daemon's writer lock, so the two can't run on one data dir.
 /// ```no_run
 /// use kensaku_core::api::{Engine, Kensaku};
 /// use kensaku_core::ops::setup::SetupRequest;
@@ -26,19 +21,19 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Opens the stores and starts indexing (when setup is complete).
+    /// Opens the stores and starts indexing (if setup is complete).
     pub fn open() -> Result<Self, StartError> {
         Ok(Self {
             runtime: Runtime::start()?,
         })
     }
 
-    /// The live indexer, for callers that need lower-level access.
+    /// The live indexer for lower-level access.
     pub fn indexer(&self) -> &Arc<IndexerManager> {
         &self.runtime.indexer
     }
 
-    /// Receives every indexing status update (push alternative to polling `get_status`).
+    /// Push alternative to polling `get_status`.
     pub fn set_status_listener(&self, listener: StatusListener) {
         self.runtime.indexer.set_status_listener(listener);
     }

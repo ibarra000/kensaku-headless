@@ -7,16 +7,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Upper bound for a single decodable image (50 megapixels).
-///
-/// Anything larger is rejected before the decoder allocates the pixel buffer,
-/// so a malformed or malicious image cannot exhaust memory.
+/// Max decodable image size (50 MP); larger images are rejected before allocation.
 pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
 
-/// Value used to disambiguate temporary thumbnail files.
 static THUMB_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Process-wide cap on image size for OCR (0 = no limit).
+/// Process-wide OCR image size cap in bytes (0 = no limit).
 static OCR_MAX_IMAGE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_ocr_max_image_bytes(bytes: u64) {
@@ -27,14 +23,10 @@ pub fn ocr_max_image_bytes() -> u64 {
     OCR_MAX_IMAGE_BYTES.load(Ordering::SeqCst)
 }
 
-/// Whether the extension is one of the raster formats we can decode cheaply.
-///
-/// HEIC/HEIF and SVG are deliberately excluded: the former is not supported by
-/// the `image` crate without a platform decoder, the latter is not a raster
-/// format.
 /// Longest side of every generated thumbnail and preview.
 pub const THUMB_SIZE: u32 = 240;
 
+/// Raster formats we decode cheaply (HEIC/HEIF and SVG deliberately excluded).
 pub fn is_supported_image_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
@@ -45,39 +37,25 @@ pub fn is_supported_image_extension(ext: &str) -> bool {
 /// Snapshot of the local OCR engine and its language data.
 #[derive(Debug, Clone, Serialize)]
 pub struct OcrStatus {
-    /// Whether `tesseract --version` exits successfully.
     pub engine_present: bool,
-    /// Languages reported by `tesseract --list-langs`.
     pub languages: Vec<String>,
-    /// `engine_present && !languages.is_empty()`.
     pub available: bool,
-    /// Where Kensaku stores downloaded language data.
     pub tessdata_dir: String,
-    /// Last error line when the engine is missing or failing.
     pub error: Option<String>,
-    /// Currently selected backend (`tesseract`, `accurate` or `indra`).
+    /// Selected backend (`tesseract`, `accurate` or `indra`).
     pub engine: String,
-    /// Whether PP-OCR can actually read: compiled in, pack present, runtime
-    /// loaded, and its self-test read known text correctly.
+    /// PP-OCR is compiled in, has its pack, loaded, and passed its self-test.
     pub accurate_available: bool,
-    /// Whether this binary was compiled with the accurate engine.
     pub accurate_compiled: bool,
-    /// Why PP-OCR cannot read right now, in plain words. `None` when it can.
     pub accurate_problem: Option<String>,
-    /// Whether Indra can actually read: compiled in, pack present, runtime
-    /// loaded, and its self-test read known text correctly.
+    /// Indra is compiled in, has its pack, loaded, and passed its self-test.
     pub indra_available: bool,
-    /// Why Indra cannot read right now, in plain words. `None` when it can.
     pub indra_problem: Option<String>,
-    /// The engine that is really reading images right now (`accurate`,
-    /// `indra`, `tesseract`, or `none`), which can differ from the selected one.
+    /// Engine actually reading now (`accurate`, `indra`, `tesseract`, `none`); may differ from `engine`.
     pub active_engine: String,
 }
 
-/// Directory holding language data downloaded by Kensaku.
-///
-/// The directory is created lazily by [`download_eng_tessdata`]; read-only
-/// callers such as [`ocr_status`] never create it.
+/// Kensaku's tessdata directory; created lazily by [`download_eng_tessdata`].
 pub fn tessdata_dir() -> PathBuf {
     crate::config::KensakuConfig::config_dir().join("tessdata")
 }
@@ -112,12 +90,10 @@ fn last_non_empty_line(bytes: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Installed Tesseract languages, probed once. Spawning `tesseract
-/// --list-langs` per image would double the process count of a crawl.
+/// Probed once: spawning `tesseract --list-langs` per image doubles crawl process count.
 static TESSERACT_LANGUAGES_CACHE: std::sync::Mutex<Option<Vec<String>>> =
     std::sync::Mutex::new(None);
 
-/// Installed language codes, without spawning Tesseract per image.
 fn installed_tesseract_languages() -> Vec<String> {
     if let Ok(slot) = TESSERACT_LANGUAGES_CACHE.lock()
         && let Some(languages) = slot.as_ref()
@@ -148,9 +124,7 @@ fn installed_tesseract_languages() -> Vec<String> {
     languages
 }
 
-/// Parses `tesseract --list-langs` output: handles the
-/// `List of available languages` header, blank lines, CRLF line endings and
-/// duplicate entries while preserving the reported order.
+/// Parses `tesseract --list-langs` output (header, blanks, CRLF, dedup; order kept).
 fn parse_langs(raw: &str) -> Vec<String> {
     let mut languages: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -169,10 +143,7 @@ fn parse_langs(raw: &str) -> Vec<String> {
     languages
 }
 
-/// Returns `dir` when it contains at least one `*.traineddata` file.
-///
-/// This is the switch that lets Kensaku prefer its private language data over
-/// a system-wide `tessdata` directory without overriding a working install.
+/// `dir` if it has a `*.traineddata`, so private data wins without overriding a working install.
 fn private_tessdata(dir: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -184,13 +155,7 @@ fn private_tessdata(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Resolves the tesseract binary to run.
-///
-/// A desktop-launched app (notably an AppImage) can inherit a shorter `PATH`
-/// than a login shell, so a perfectly good system install can look missing.
-/// After walking `PATH` we probe the usual install locations. Setting
-/// `KENSAKU_TESSERACT` overrides both, which keeps Nix/Flatpak/portable
-/// installs workable without patching the app.
+/// Resolves tesseract: `KENSAKU_TESSERACT`, bundled, `PATH`, then well-known prefixes (inherited `PATH` may be short).
 fn tesseract_program() -> PathBuf {
     if let Some(path) = std::env::var_os("KENSAKU_TESSERACT") {
         return PathBuf::from(path);
@@ -202,8 +167,7 @@ fn tesseract_program() -> PathBuf {
         "tesseract"
     };
 
-    // A copy shipped inside the app wins over whatever the user installed,
-    // so OCR behaves the same on every machine the app is installed on.
+    // A bundled copy wins so OCR behaves the same everywhere.
     for candidate in bundled_tesseract_paths(name) {
         if candidate.is_file() {
             return candidate;
@@ -225,12 +189,9 @@ fn tesseract_program() -> PathBuf {
         }
     }
 
-    // Nothing found: the OS will now produce the canonical "not found" error.
     PathBuf::from(name)
 }
 
-/// Places an app-bundled Tesseract can live: next to the executable (Windows
-/// installs, Linux packages) and in the macOS bundle's Resources folder.
 fn bundled_tesseract_paths(name: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let Ok(exe) = std::env::current_exe() else {
@@ -239,7 +200,7 @@ fn bundled_tesseract_paths(name: &str) -> Vec<PathBuf> {
     if let Some(dir) = exe.parent() {
         paths.push(dir.join(name));
         paths.push(dir.join("tesseract").join(name));
-        // macOS: Kensaku.app/Contents/MacOS/kensaku -> Contents/Resources
+        // macOS: Contents/MacOS/kensaku -> Contents/Resources
         if let Some(contents) = dir.parent() {
             paths.push(contents.join("Resources").join("tesseract").join(name));
         }
@@ -247,7 +208,6 @@ fn bundled_tesseract_paths(name: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// Well-known install prefixes used when `tesseract` is not on `PATH`.
 fn fallback_tesseract_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -295,8 +255,7 @@ fn fallback_tesseract_paths() -> Vec<PathBuf> {
 fn tesseract_command() -> Command {
     let prog = tesseract_program();
     let mut command = Command::new(&prog);
-    // On Linux AppImage, the child process inherits LD_LIBRARY_PATH pointing to AppImage's
-    // internal libraries, which breaks host system binaries like /usr/bin/tesseract.
+    // AppImage's LD_LIBRARY_PATH breaks host binaries like /usr/bin/tesseract.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Ok(orig) = std::env::var("LD_LIBRARY_PATH_ORIG") {
@@ -314,23 +273,14 @@ fn tesseract_command() -> Command {
             }
         }
     }
-    // Tesseract links OpenMP and, left alone, starts one thread per core in
-    // every process. Kensaku already runs several OCR processes concurrently,
-    // so that oversubscribes the CPU badly (a crawl with 8 workers behaved as
-    // if it had one). Pin each child to a single thread; the outer worker pool
-    // provides the parallelism instead.
+    // OpenMP spawns a thread per core per process; the worker pool already parallelizes.
     command.env("OMP_THREAD_LIMIT", "1");
     command.env("OMP_NUM_THREADS", "1");
-    // On Windows, tesseract is a console application. Without this flag every
-    // invocation flashes a console window on the desktop (issue #N).
     crate::util::process::hide_console(&mut command);
     command
 }
 
-/// True when `tesseract --version` runs successfully.
-///
-/// A lighter probe than [`ocr_status`]: enough to decide at startup whether
-/// Tesseract is installed at all, without listing languages.
+/// True when `tesseract --version` runs (cheaper than [`ocr_status`]).
 pub fn tesseract_available() -> bool {
     tesseract_command()
         .arg("--version")
@@ -340,12 +290,11 @@ pub fn tesseract_available() -> bool {
 
 /// Inspects the tesseract binary and its language data. Never panics.
 pub fn ocr_status() -> OcrStatus {
-    // A status check is also the "re-check" button: pick up a Tesseract the
-    // user just installed.
+    // Doubles as "re-check": pick up a freshly installed Tesseract.
     reset_tesseract_probe();
     let dir = tessdata_dir();
 
-    // Some builds print version information to stderr instead of stdout.
+    // Some builds print version information to stderr.
     let (engine_present, mut error) = match tesseract_command().arg("--version").output() {
         Ok(output) if output.status.success() => (true, None),
         Ok(output) => (
@@ -358,8 +307,7 @@ pub fn ocr_status() -> OcrStatus {
     let mut languages = Vec::new();
     let mut list = tesseract_command();
     list.arg("--list-langs");
-    // The configured (private) tessdata directory takes precedence when it
-    // exists, mirroring what `extract_image_ocr` does at runtime.
+    // Private tessdata takes precedence, mirroring `extract_image_ocr`.
     if dir.is_dir() {
         list.env("TESSDATA_PREFIX", &dir);
     }
@@ -368,7 +316,6 @@ pub fn ocr_status() -> OcrStatus {
         Ok(output) if output.status.success() => {
             languages = parse_langs(&String::from_utf8_lossy(&output.stdout));
             if languages.is_empty() {
-                // Keep working with builds that print the list to stderr.
                 languages = parse_langs(&String::from_utf8_lossy(&output.stderr));
             }
         }
@@ -388,11 +335,7 @@ pub fn ocr_status() -> OcrStatus {
     build_status(engine_present, languages, dir, error)
 }
 
-/// Downloads `eng.traineddata` into [`tessdata_dir`] and returns its path.
-///
-/// An existing file larger than 1 MB is reused. The download is written to a
-/// `.part` file and renamed into place only after it passes a size sanity
-/// check, so a failed attempt never leaves a corrupt language file behind.
+/// Downloads `eng.traineddata` (reusing one >1 MB); writes to `.part` and renames after a size check.
 pub fn download_eng_tessdata() -> Result<PathBuf, String> {
     download_eng_tessdata_to(&tessdata_dir())
 }
@@ -481,14 +424,9 @@ fn download_eng_tessdata_to(dir: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// Cached result of [`tesseract_available`]: 0 unknown, 1 yes, 2 no.
-///
-/// Engine selection runs for every image, and spawning `tesseract --version`
-/// each time would double the process count of a crawl. Reset with
-/// [`reset_tesseract_probe`] when the user may have installed it.
+/// Cached [`tesseract_available`] (0 unknown, 1 yes, 2 no); avoids a spawn per image.
 static TESSERACT_PROBE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// True when Tesseract can run. Probed once, then cached.
 pub fn tesseract_usable() -> bool {
     match TESSERACT_PROBE.load(Ordering::Relaxed) {
         1 => true,
@@ -501,8 +439,7 @@ pub fn tesseract_usable() -> bool {
     }
 }
 
-/// True when Tesseract runs *and* has at least one language to read with.
-/// A binary without language data starts fine and then fails on every image.
+/// Tesseract runs *and* has a language; without data it fails on every image.
 fn tesseract_has_language() -> bool {
     let mut list = tesseract_command();
     list.arg("--list-langs");
@@ -528,7 +465,7 @@ fn tesseract_has_language() -> bool {
     }
 }
 
-/// Forgets the cached Tesseract probe (Settings "re-check", config changes).
+/// Forgets the cached Tesseract probe.
 pub fn reset_tesseract_probe() {
     TESSERACT_PROBE.store(0, Ordering::Relaxed);
     if let Ok(mut slot) = TESSERACT_LANGUAGES_CACHE.lock() {
@@ -536,16 +473,11 @@ pub fn reset_tesseract_probe() {
     }
 }
 
-/// Reads text from an image file with whichever engine can run.
-///
-/// See [`crate::ocr::OcrOutcome`]: `Unavailable` means no engine could run
-/// and the file should be retried later; `NoText` is a final answer.
+/// OCRs an image with whichever engine can run (`Unavailable` = retry later, `NoText` = final).
 pub fn ocr_image(path: &Path) -> crate::ocr::OcrOutcome {
     use crate::ocr::{ACCURATE, INDRA, OcrOutcome, TESSERACT};
 
-    // Opt-in size cap (`ocr_max_image_bytes`, 0 = off). Skipping is a final
-    // answer, not "retry later"; changing the cap re-queues images through
-    // the OCR signature.
+    // Skipping over the cap is final; changing the cap re-queues via the OCR signature.
     let cap = ocr_max_image_bytes();
     if cap > 0
         && let Ok(meta) = std::fs::metadata(path)
@@ -563,8 +495,6 @@ pub fn ocr_image(path: &Path) -> crate::ocr::OcrOutcome {
             outcome => outcome,
         },
         ACCURATE => match crate::ocr::extract_image_ocr(path) {
-            // The accurate engine was usable a moment ago; if it just failed
-            // to load, Tesseract is still better than nothing.
             OcrOutcome::Unavailable if tesseract_usable() => tesseract_ocr(path),
             outcome => outcome,
         },
@@ -573,12 +503,11 @@ pub fn ocr_image(path: &Path) -> crate::ocr::OcrOutcome {
     }
 }
 
-/// Reads text from a decoded image (a scanned PDF page).
 pub fn ocr_decoded_image(image: &DynamicImage) -> crate::ocr::OcrOutcome {
     use crate::ocr::{ACCURATE, INDRA, OcrOutcome, TESSERACT};
 
     let via_tesseract = |image: &DynamicImage| {
-        // Tesseract needs a file. A unique temp PNG, removed right after.
+        // Tesseract needs a file: unique temp PNG, removed right after.
         let tmp = std::env::temp_dir().join(format!(
             "kensaku-ocr-{}-{}.png",
             std::process::id(),
@@ -611,8 +540,7 @@ pub fn ocr_decoded_image(image: &DynamicImage) -> crate::ocr::OcrOutcome {
     }
 }
 
-/// Extracts text from an image via OCR. `None` for no text or no engine;
-/// callers that must tell those apart use [`ocr_image`].
+/// OCR text, or `None` for no text or no engine (use [`ocr_image`] to distinguish).
 pub fn extract_image_ocr(path: &Path) -> Option<String> {
     match ocr_image(path) {
         crate::ocr::OcrOutcome::Text(text) => Some(text),
@@ -620,13 +548,7 @@ pub fn extract_image_ocr(path: &Path) -> Option<String> {
     }
 }
 
-/// Language argument for Tesseract, e.g. `eng+hin`.
-///
-/// Tesseract defaults to English when `-l` is absent, so a non-English corpus
-/// indexed as English garbage even though the installed language data was
-/// listed in Settings. The configured languages come from config; whatever
-/// they name has to exist in `--list-langs`, otherwise Tesseract fails the
-/// whole run.
+/// Tesseract `-l` argument (e.g. `eng+hin`), limited to installed languages (unknown ones fail the run).
 fn tesseract_lang_arg() -> Option<String> {
     let available = installed_tesseract_languages();
 
@@ -639,8 +561,7 @@ fn tesseract_lang_arg() -> Option<String> {
         .collect();
 
     if chosen.is_empty() {
-        // No explicit setting (or none of it is installed): fall back to
-        // English when present, then to whatever single language exists.
+        // Fallback: English if installed, else the single available language.
         if available.iter().any(|lang| lang.eq_ignore_ascii_case("eng")) {
             chosen.push("eng".to_string());
         } else if available.len() == 1 {
@@ -655,22 +576,10 @@ fn tesseract_lang_arg() -> Option<String> {
     Some(chosen.join("+"))
 }
 
-/// Runs Tesseract on an image file.
 fn tesseract_ocr(path: &Path) -> crate::ocr::OcrOutcome {
     use crate::ocr::OcrOutcome;
-    // Try tesseract (available on Linux and macOS with Homebrew).
-    //
-    // On macOS, feed the image bytes through stdin instead of handing
-    // tesseract the original path. An external process reading a file inside
-    // a protected folder (Documents, Desktop, Downloads, Pictures) triggers
-    // its own TCC permission prompt for *every* file, which is what produced
-    // the repeated "allow access" dialogs during a crawl. Reading the bytes
-    // here (in the main process, which already holds the folder grant) keeps
-    // the child process from touching the protected file at all.
-    //
-    // Linux and Windows have no per-process folder grant, so they keep
-    // passing the path: one less full-file copy in memory, and no reliance on
-    // how a particular tesseract build handles binary stdin.
+    // macOS: pipe bytes via stdin so tesseract never opens files in TCC-protected
+    // folders (a prompt per file); other platforms pass the path.
     let stdin_bytes = if cfg!(target_os = "macos") {
         match std::fs::read(path) {
             Ok(bytes) => Some(bytes),
@@ -691,14 +600,12 @@ fn tesseract_ocr(path: &Path) -> crate::ocr::OcrOutcome {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    // Without `-l`, every image is read as English regardless of the language
-    // data the user installed.
+    // Without `-l`, Tesseract reads everything as English.
     if let Some(langs) = tesseract_lang_arg() {
         command.arg("-l").arg(langs);
     }
 
-    // Prefer Kensaku's private language data when it has been downloaded, but
-    // never override a working system installation.
+    // Prefer private language data, but never override a working system install.
     if let Some(dir) = private_tessdata(&tessdata_dir()) {
         command.env("TESSDATA_PREFIX", dir);
     }
@@ -706,18 +613,14 @@ fn tesseract_ocr(path: &Path) -> crate::ocr::OcrOutcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            // Installed a moment ago and gone now, or not runnable: forget
-            // the cached probe so the next status check tells the truth.
+            // Forget the cached probe so the next status check is accurate.
             eprintln!("[Kensaku OCR] could not start tesseract: {e}");
             reset_tesseract_probe();
             return OcrOutcome::Unavailable;
         }
     };
     if let (Some(bytes), Some(mut stdin)) = (stdin_bytes, child.stdin.take()) {
-        // Writing in a separate thread avoids deadlocking when the input is
-        // larger than the OS pipe buffer. The buffer is moved, not cloned:
-        // large scans can be tens of megabytes. Dropping `stdin` at the end
-        // of the thread closes the pipe, which is tesseract's EOF.
+        // Write on a thread to avoid pipe-buffer deadlock; dropping stdin sends EOF.
         std::thread::spawn(move || {
             let _ = stdin.write_all(&bytes);
         });
@@ -738,10 +641,7 @@ fn tesseract_ocr(path: &Path) -> crate::ocr::OcrOutcome {
     }
 }
 
-/// Reads the image dimensions without decoding the pixel data.
-///
-/// Returns `None` for unreadable/corrupt images and for images above the
-/// [`MAX_IMAGE_PIXELS`] budget.
+/// Image dimensions without decoding; `None` if unreadable or over [`MAX_IMAGE_PIXELS`].
 pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
     let (width, height) = image::image_dimensions(path).ok()?;
     if width == 0 || height == 0 {
@@ -753,27 +653,12 @@ pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-/// Backwards-compatible alias for [`dimensions`].
-///
-/// Older callers shelled out to ImageMagick's `identify`; the `image` crate is
-/// faster, has no external dependency and enforces the decode budget.
+/// Alias for [`dimensions`].
 pub fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
     dimensions(path)
 }
 
-/// Decodes an image with the 50 MP budget enforced.
-///
-/// The dimensions are checked up front and the decoder itself is configured
-/// with matching width/height/allocation limits, so an image cannot expand
-/// into a much larger in-memory buffer than advertised.
-/// Decodes an image for recognition, holding a budget reservation for as long
-/// as the caller keeps the returned permit.
-///
-/// Every full-page decode that feeds OCR or visual embedding goes through here,
-/// so the peak number of decoded pixel buffers in memory is bounded by
-/// `util::budget::decode_budget()` no matter how many workers run. The
-/// reservation is taken before the decoder allocates, and the image is only
-/// decoded once the reservation succeeds.
+/// Decodes for OCR/embedding, reserving decode budget before allocating; hold the permit while in use.
 pub(crate) fn decode_for_recognition(
     path: &Path,
 ) -> Option<(DynamicImage, crate::util::budget::Permit)> {
@@ -784,6 +669,7 @@ pub(crate) fn decode_for_recognition(
     Some((image, permit))
 }
 
+/// Decodes with the 50 MP budget enforced via decoder limits.
 pub(crate) fn decode_guarded(path: &Path) -> Option<DynamicImage> {
     let (width, height) = dimensions(path)?;
 
@@ -797,12 +683,7 @@ pub(crate) fn decode_guarded(path: &Path) -> Option<DynamicImage> {
     reader.decode().ok()
 }
 
-/// Computes a 64-bit difference hash (dHash) for an image.
-///
-/// The image is reduced to 9x8 grayscale; each bit records whether the left
-/// pixel of a row-major adjacent pair is brighter than the right one. Images
-/// that fail to decode, or exceed the pixel budget, return `None` instead of
-/// panicking.
+/// 64-bit dHash (9x8 grayscale); `None` on decode failure or over budget.
 pub fn phash64(path: &Path) -> Option<u64> {
     hash_image(&decode_guarded(path)?)
 }
@@ -826,17 +707,12 @@ fn hash_image(image: &DynamicImage) -> Option<u64> {
     Some(hash)
 }
 
-/// Hashes a cached thumbnail without touching the source image.
 pub fn phash64_from_thumbnail(thumb: &Path) -> Option<u64> {
     let image = image::open(thumb).ok()?;
     hash_image(&image)
 }
 
-/// Reuses a *fresh* thumbnail if one already exists, otherwise returns `None`.
-///
-/// Unlike [`phash64_cached`], this never decodes or writes the source image, so
-/// the crawl can opportunistically group already-thumbnailed screenshots
-/// without paying the full-image cost that K3 removed from the crawl path.
+/// Hashes an existing fresh thumbnail; never decodes the source.
 pub fn phash64_reusing_fresh_thumbnail(path: &Path, thumbs_dir: &Path) -> Option<u64> {
     let thumb = thumbnail_path(path, thumbs_dir);
     if is_fresh(&thumb, path) {
@@ -846,28 +722,20 @@ pub fn phash64_reusing_fresh_thumbnail(path: &Path, thumbs_dir: &Path) -> Option
     }
 }
 
-/// Returns a perceptual hash, reusing a fresh thumbnail when one exists and
-/// otherwise decoding the source once, writing the thumbnail, and hashing it.
+/// Perceptual hash via a fresh thumbnail, else decodes once and writes the thumbnail.
 pub fn phash64_cached(path: &Path, thumbs_dir: &Path) -> Option<u64> {
     let thumb = thumbnail(path, thumbs_dir)?;
     phash64_from_thumbnail(&thumb)
 }
 
-/// Absolute path of the cached thumbnail for `path` inside `out_dir`.
 pub fn thumbnail_path(path: &Path, out_dir: &Path) -> PathBuf {
     let hash = fnv1a(path.to_string_lossy().as_bytes());
     out_dir.join(format!("{:016x}.jpg", hash))
 }
 
-/// Generates (or reuses) a 240px JPEG thumbnail for `path`.
-///
-/// Existing thumbnails that are at least as new as the source are returned
-/// unchanged, which makes repeated calls idempotent. New thumbnails are
-/// written to a temporary file and renamed into place so readers never observe
-/// a partially written JPEG.
+/// Generates (or reuses a fresh) 240px JPEG thumbnail, written atomically via temp + rename.
 pub fn thumbnail(path: &Path, out_dir: &Path) -> Option<PathBuf> {
-    // Decoding a cloud-only file downloads it. Thumbnails are opportunistic
-    // (grid, hash backfill), so skip instead of pulling the file down.
+    // Decoding a cloud-only file downloads it; thumbnails are opportunistic.
     if crate::indexer::walker::is_cloud_placeholder_path(path) {
         return None;
     }
@@ -906,8 +774,7 @@ pub fn thumbnail(path: &Path, out_dir: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    // `rename` replaces the destination atomically on Unix. Windows refuses to
-    // overwrite, so fall back to removing the stale file once.
+    // Windows `rename` won't overwrite: remove the stale file once and retry.
     if std::fs::rename(&temp, &target).is_err() {
         let _ = std::fs::remove_file(&target);
         if std::fs::rename(&temp, &target).is_err() {
@@ -926,7 +793,7 @@ fn is_fresh(target: &Path, source: &Path) -> bool {
     let Ok(source_meta) = std::fs::metadata(source) else {
         return false;
     };
-    // Only thumbnails produced by the current size policy are reusable.
+    // Only thumbnails at the current size policy are reusable.
     let Ok((target_width, target_height)) = image::image_dimensions(target) else {
         return false;
     };
@@ -959,7 +826,6 @@ mod tests {
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    /// A temp directory that removes itself on drop.
     struct TempDir {
         path: PathBuf,
     }
@@ -998,8 +864,7 @@ mod tests {
         save(&RgbImage::from_pixel(64, 48, Rgb(color)), path);
     }
 
-    /// Horizontal brightness ramp; `invert` flips the direction, which flips
-    /// every dHash comparison.
+    /// Horizontal brightness ramp; `invert` flips every dHash comparison.
     fn gradient(path: &Path, invert: bool) {
         let image = RgbImage::from_fn(64, 48, |x, _| {
             let value = ((x * 255) / 63) as u8;
@@ -1020,9 +885,7 @@ mod tests {
 
     #[test]
     fn recognition_decode_reserves_exactly_the_decoded_size() {
-        // The reservation must equal the RGBA size of the page, and must be
-        // held for as long as the caller keeps the permit: that is what keeps
-        // the peak bounded while OCR runs.
+        // Reservation equals the page's RGBA size and lives as long as the permit.
         let dir = TempDir::new("reserve");
         let path = dir.join("page.png");
         save(&RgbImage::from_pixel(64, 48, Rgb([9, 9, 9])), &path);
@@ -1093,8 +956,7 @@ mod tests {
         let modified = dir.join("modified.png");
         gradient(&base, false);
 
-        // Same ramp with the far-right quarter painted black, which reverses
-        // the last gradient comparisons without touching the rest.
+        // Far-right quarter black reverses only the last comparisons.
         let image = RgbImage::from_fn(64, 48, |x, _| {
             let value = ((x * 255) / 63) as u8;
             if x >= 48 {
@@ -1116,10 +978,7 @@ mod tests {
 
     #[test]
     fn solid_colors_are_color_invariant() {
-        // dHash compares neighbouring luminance values, so two *uniform*
-        // images have no gradient signal regardless of their color. This
-        // documents the deliberate behavior; colour-only differences are not
-        // near-duplicates under a dHash.
+        // Uniform images carry no dHash signal regardless of colour.
         let dir = TempDir::new("phash-solid");
         let red = dir.join("red.png");
         let blue = dir.join("blue.png");
@@ -1171,7 +1030,6 @@ mod tests {
 
         let thumb = thumbnail_path(&source, &out_dir);
         std::fs::create_dir_all(&out_dir).expect("thumb dir");
-        // A thumbnail from the previous 480 px policy must be replaced.
         let legacy = image::RgbImage::new(480, 360);
         legacy
             .save_with_format(&thumb, image::ImageFormat::Jpeg)
@@ -1221,8 +1079,7 @@ mod tests {
             phash64_reusing_fresh_thumbnail(&source, &thumbs).expect("fresh thumbnail hash");
         assert_eq!(cached, reused);
 
-        // The thumbnail mtime must be untouched, proving the source was not
-        // re-decoded and the thumbnail was not rewritten.
+        // Unchanged mtime proves no re-decode or rewrite.
         let mtime = std::fs::metadata(thumbnail_path(&source, &thumbs))
             .and_then(|m| m.modified())
             .expect("mtime");
@@ -1275,7 +1132,6 @@ mod tests {
         let dir = TempDir::new("tessdata-empty");
         assert_eq!(private_tessdata(&dir.path), None);
 
-        // Unrelated files do not count.
         std::fs::write(dir.join("README.txt"), b"not language data").expect("write unrelated file");
         assert_eq!(private_tessdata(&dir.path), None);
 

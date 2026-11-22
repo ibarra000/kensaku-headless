@@ -1,10 +1,5 @@
-//! The one Kensaku API.
-//!
-//! Every surface speaks the same method table: the daemon serves it over
-//! JSON-RPC, the HTTP server exposes it under `/v1/`, the CLI calls it through
-//! a [`Client`], and Rust embedders call it in-process through an [`Engine`].
-//! Method names, parameters and results are identical everywhere; only the
-//! transport differs.
+//! The one Kensaku API: one method table served over daemon JSON-RPC, HTTP `/v1/`, the CLI
+//! [`Client`] and in-process [`Engine`]; only the transport differs.
 
 pub mod client;
 pub mod dispatch;
@@ -21,13 +16,10 @@ pub use methods::{Access, METHODS, MethodSpec};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-/// Anything that can execute API methods: an in-process [`Engine`] or a
-/// daemon [`Client`]. Typed helpers are provided on top of [`Kensaku::call`].
+/// Executes API methods via an in-process [`Engine`] or daemon [`Client`].
 pub trait Kensaku {
-    /// Executes `method` with JSON `params` and returns the JSON result.
     fn call(&self, method: &str, params: Value) -> Result<Value, ApiError>;
 
-    /// [`Kensaku::call`], deserializing the result into `T`.
     fn call_typed<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ApiError>
     where
         Self: Sized,
@@ -53,7 +45,6 @@ pub trait Kensaku {
         )
     }
 
-    /// Current indexing progress.
     fn status(&self) -> Result<crate::indexer::IndexingStatus, ApiError>
     where
         Self: Sized,
@@ -61,7 +52,6 @@ pub trait Kensaku {
         self.call_typed("get_status", json!({}))
     }
 
-    /// Current configuration.
     fn config(&self) -> Result<crate::config::KensakuConfig, ApiError>
     where
         Self: Sized,

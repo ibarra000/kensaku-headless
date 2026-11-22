@@ -1,9 +1,7 @@
-//! Image geometry for the Indra OCR port: the numpy/OpenCV pre- and
-//! post-processing of `indra_ocr` (det_post.py, rec_preproc.py, pipeline.py,
-//! order_post.py) on plain grayscale buffers. No ONNX Runtime here, so all of
-//! it is unit-tested without the models.
+//! Indra OCR image geometry (numpy/OpenCV pre/post-processing) on grayscale
+//! buffers; testable without the models.
 
-/// 8-bit grayscale image, row-major (0 = black, 255 = white).
+/// 8-bit grayscale, row-major (0 = black).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gray {
     pub w: usize,
@@ -20,8 +18,7 @@ impl Gray {
         }
     }
 
-    /// Grayscale with OpenCV's BT.601 weights, transparency composited over
-    /// white (a transparent screenshot would otherwise read as a black page).
+    /// BT.601 grayscale; transparency composited over white.
     pub fn from_image(image: &image::DynamicImage) -> Self {
         let rgba = image.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
@@ -40,7 +37,7 @@ impl Gray {
         self.data[y * self.w + x]
     }
 
-    /// A quarter turn counter-clockwise (`np.rot90(a, 1)`).
+    /// `np.rot90(a, 1)`
     pub fn rot90_ccw(&self) -> Self {
         let mut out = Self::new(self.h, self.w, 0);
         for y in 0..out.h {
@@ -51,7 +48,7 @@ impl Gray {
         out
     }
 
-    /// A quarter turn clockwise (`np.rot90(a, -1)`).
+    /// `np.rot90(a, -1)`
     pub fn rot90_cw(&self) -> Self {
         let mut out = Self::new(self.h, self.w, 0);
         for y in 0..out.h {
@@ -63,11 +60,9 @@ impl Gray {
     }
 }
 
-/// Source weights of one output sample along an axis.
 type Taps = Vec<Vec<(usize, f32)>>;
 
-/// OpenCV `INTER_AREA` for shrinking: each output pixel averages the input
-/// span it covers, partial pixels weighted by coverage.
+/// OpenCV `INTER_AREA` (coverage-weighted averaging) for shrinking.
 fn area_taps(src: usize, dst: usize) -> Taps {
     let scale = src as f64 / dst as f64;
     (0..dst)
@@ -101,8 +96,7 @@ fn linear_taps(src: usize, dst: usize) -> Taps {
         .collect()
 }
 
-/// Resizes to `w` x `h`: area averaging when shrinking, bilinear otherwise
-/// (the choice every resize in `indra_ocr` makes).
+/// Area averaging when shrinking, bilinear otherwise.
 pub fn resize(src: &Gray, w: usize, h: usize) -> Gray {
     let w = w.max(1);
     let h = h.max(1);
@@ -118,7 +112,6 @@ pub fn resize(src: &Gray, w: usize, h: usize) -> Gray {
         }
     };
     let (xt, yt) = (taps(src.w, w), taps(src.h, h));
-    // Horizontal pass into f32 rows, then vertical.
     let mut rows = vec![0f32; src.h * w];
     for y in 0..src.h {
         let line = &src.data[y * src.w..(y + 1) * src.w];
@@ -136,7 +129,7 @@ pub fn resize(src: &Gray, w: usize, h: usize) -> Gray {
     out
 }
 
-/// The page shrunk to at most `side` pixels a side (`pipeline.preview`).
+/// `pipeline.preview`: at most `side` pixels a side.
 pub fn preview(gray: &Gray, side: usize) -> Gray {
     let s = side as f64 / gray.w.max(gray.h) as f64;
     if s >= 1.0 {
@@ -160,8 +153,7 @@ fn ink_padded(gray: &Gray, pw: usize, ph: usize) -> Vec<f32> {
     out
 }
 
-/// Detector input (`det_post.page_to_input`): long side scaled to
-/// `long_side`, padded to a multiple of 32. Returns (ink, height, width, scale).
+/// `det_post.page_to_input`: long side scaled, padded to a multiple of 32. Returns (ink, h, w, scale).
 pub fn page_to_input(gray: &Gray, long_side: usize) -> (Vec<f32>, usize, usize, f64) {
     let scale = long_side as f64 / gray.w.max(gray.h) as f64;
     let small = resize(gray, scaled(gray.w, scale), scaled(gray.h, scale));
@@ -170,14 +162,12 @@ pub fn page_to_input(gray: &Gray, long_side: usize) -> (Vec<f32>, usize, usize, 
     (ink_padded(&small, pw, ph), ph, pw, scale)
 }
 
-/// Orientation model input: long side `side`, padded square.
 pub fn orient_input(gray: &Gray, side: usize) -> Vec<f32> {
     let s = side as f64 / gray.w.max(gray.h) as f64;
     let small = resize(gray, scaled(gray.w, s), scaled(gray.h, s));
     ink_padded(&small, side, side)
 }
 
-/// A detected text line in page pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineBox {
     pub x0: f32,
@@ -195,9 +185,7 @@ impl LineBox {
 const OUT_STRIDE: f32 = 2.0;
 const CORE_X_SHRINK: f32 = 0.15;
 
-/// Decodes the detector output (`det_post.decode`): `out` is [C, h, w] with
-/// core logit, distance to the line top, distance to the line bottom.
-/// Boxes are in detector input pixels.
+/// `det_post.decode`: `out` is [C, h, w] (core logit, top/bottom distance); boxes in input pixels.
 pub fn decode_lines(out: &[f32], h: usize, w: usize) -> Vec<LineBox> {
     let n = h * w;
     if out.len() < 3 * n {
@@ -261,8 +249,7 @@ pub fn decode_lines(out: &[f32], h: usize, w: usize) -> Vec<LineBox> {
         .collect()
 }
 
-/// `np.percentile` (linear) of the 2nd, 50th and 98th percentile, from a
-/// histogram.
+/// Linear 2nd/50th/98th percentiles from a histogram.
 fn percentiles(values: impl Iterator<Item = u8>) -> Option<[f32; 3]> {
     let mut hist = [0usize; 256];
     let mut n = 0usize;
@@ -291,7 +278,7 @@ fn percentiles(values: impl Iterator<Item = u8>) -> Option<[f32; 3]> {
     }))
 }
 
-/// Light text on a dark ground (`rec_preproc.is_dark_line`): read inverted.
+/// `rec_preproc.is_dark_line`: light text on dark, read inverted.
 pub fn is_dark_line(gray: &Gray, b: &LineBox) -> bool {
     let (x0, x1) = (b.x0.max(0.0) as usize, ((b.x1 as usize) + 1).min(gray.w));
     let (y0, y1) = (b.y0.max(0.0) as usize, ((b.y1 as usize) + 1).min(gray.h));
@@ -309,15 +296,13 @@ const PAD_Y: f32 = 0.2;
 const PAD_X: f32 = 0.3;
 const WIDTH_MULTIPLE: usize = 8;
 
-/// Recognizer input of one line: an ink map `height * window` pixels tall.
 pub struct Crop {
     pub h: usize,
     pub w: usize,
     pub ink: Vec<f32>,
 }
 
-/// One line cropped and scaled (`rec_preproc.crop_line`). A tall window
-/// (`window` > 1) keeps the text scale and adds the page above and below.
+/// `rec_preproc.crop_line`; `window` > 1 adds page context above and below.
 pub fn crop_line(gray: &Gray, b: &LineBox, height: usize, window: usize, dark: bool) -> Crop {
     let pad_y = (window as f32 * (1.0 + 2.0 * PAD_Y) - 1.0) / 2.0;
     let height = height * window;
@@ -353,8 +338,7 @@ pub fn crop_line(gray: &Gray, b: &LineBox, height: usize, window: usize, dark: b
     }
 }
 
-/// Right-pads crops of one height to a common width (`pad_batch`): returns
-/// the [B, 1, H, W] batch, W, and each crop's width.
+/// `pad_batch`: returns the [B, 1, H, W] batch, W, and each crop's width.
 pub fn pad_batch(crops: &[&Crop]) -> (Vec<f32>, usize, Vec<i64>) {
     let h = crops[0].h;
     let wm = crops.iter().map(|c| c.w).max().unwrap_or(0).div_ceil(WIDTH_MULTIPLE)
@@ -369,8 +353,7 @@ pub fn pad_batch(crops: &[&Crop]) -> (Vec<f32>, usize, Vec<i64>) {
     (out, wm, crops.iter().map(|c| c.w as i64).collect())
 }
 
-/// Groups line indices into batches of similar width (`width_batches`), so
-/// little compute goes to padding and no batch grows past 64 x 640 columns.
+/// `width_batches`: similar widths, capped at 64 x 640 columns.
 pub fn width_batches(widths: &[usize]) -> Vec<Vec<usize>> {
     const MAX_BATCH: usize = 64;
     const MAX_RATIO: f32 = 1.3;
@@ -451,7 +434,6 @@ mod tests {
     #[test]
     fn crop_keeps_text_scale_and_inverts_dark_lines() {
         let mut g = Gray::new(100, 40, 255);
-        // Text-like: thin strokes on paper, not a solid block.
         for x in (20..80).step_by(4) {
             for y in 15..25 {
                 g.data[y * 100 + x] = 0;
