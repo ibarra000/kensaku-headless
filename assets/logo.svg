@@ -1,10 +1,12 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kensaku Headless logo">
-  <!-- Wireframe adaptation of Kensaku's mark (github.com/yjid/kensaku): K stem, two arms, lens. -->
-  <g fill="none" stroke="currentColor" stroke-width="20" stroke-linejoin="round">
-    <rect x="10" y="10" width="1004" height="1004" rx="225"/>
-    <rect x="224" y="262" width="160" height="540"/>
-    <polygon points="354.9,693.9 711.9,801.9 754.1,662.1 397.1,554.1"/>
-    <polygon points="417.2,632.2 702.2,437.2 619.8,316.8 334.8,511.8"/>
-    <circle cx="700" cy="346" r="126"/>
+  <!-- Wireframe adaptation of Kensaku's mark (github.com/yjid/kensaku): white-filled K, outlined tile and lens. -->
+  <g stroke="currentColor" stroke-width="20" stroke-linejoin="round">
+    <rect x="10" y="10" width="1004" height="1004" rx="225" fill="none"/>
+    <g fill="#FFFFFF">
+      <polygon points="354.9,693.9 711.9,801.9 754.1,662.1 397.1,554.1"/>
+      <polygon points="417.2,632.2 702.2,437.2 619.8,316.8 334.8,511.8"/>
+      <rect x="224" y="262" width="160" height="540"/>
+    </g>
+    <circle cx="700" cy="346" r="126" fill="none"/>
   </g>
 </svg>
