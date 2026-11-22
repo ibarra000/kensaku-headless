@@ -77,7 +77,7 @@ Title template: `Kensaku Headless: search names, contents and screenshots of you
 - [ ] A tagged release exists with archives for all five targets and `SHA256SUMS`.
 - [ ] (Later) Windows `kensaku.exe` is signed (see [docs/SIGNING.md](../docs/SIGNING.md)).
 - [ ] CI is green on `main`.
-- [ ] A new social preview image (terminal-based, credits Kensaku) is uploaded
+- [ ] `assets/social-preview.png` is uploaded
       in repo Settings → General → Social preview (GitHub has no API for this).
 - [ ] README quick start has been run start to finish on a clean machine.
 - [ ] Discussions are enabled for questions and roadmap votes.
