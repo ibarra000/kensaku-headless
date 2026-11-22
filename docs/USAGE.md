@@ -1,67 +1,241 @@
 # Usage
 
-> This page documents **shipped behavior** in 1.0.16: plain-language intent, `/`
-> commands, `@` scopes, facet counts, window modes, and settings. The visual
-> Beta only downloads a model pack; it is not part of search yet.
+> This page documents the `kensaku` command line in 2.0.0-dev. The MCP server and
+> the HTTP API are covered in [AGENTS.md](AGENTS.md) and [API.md](API.md).
 
-## The window
+## Command line
 
-Kensaku has two window modes, chosen during setup and switchable in
-**Settings → General → Window**:
+Every command talks to the background daemon, which owns the index. The first command
+in a session starts the daemon if it is not running. See [INSTALL.md](INSTALL.md#the-daemon).
 
-- **Launcher** (the setup default) — press <kbd>Alt</kbd>+<kbd>Space</kbd>
-  (configurable in Settings) to toggle a floating search window. It hides on
-  close, when it loses focus (clicking away), or on <kbd>Esc</kbd>, keeps the
-  index warm in the tray, stays out of the taskbar/dock, and appears on every
-  workspace.
-- **Desktop app** — a normal decorated window in your taskbar/dock. Best if you
-  treat Kensaku like any other app.
+### Global flags
 
-Either mode works from the same index. In launcher mode the global shortcut is
-registered; in desktop app mode it is not, because the window is already in the
-taskbar.
-
-**Closing is separate from the mode.** `close_to_background` is on by default:
-closing either window hides it, destroys the webview, and keeps the index warm,
-so reopening is instant. Quit from the tray menu, or turn the setting off in
-**Settings → General → Window**.
-
-The main page is intentionally just **search + category chips + files**. Every
-statistic and setting lives in Settings, so the search surface stays quiet.
-
-- **Search bar** — type anything. Plain words search names and content.
-- **Category chips** — All, Files, Folders, Images, Docs, Code, Media, Recent.
-  They map to `type:` / `modified:` filters.
-- **Results** — 52px rows or square-ish cards (minimum 168px). Selected row has an accent rail.
-- **Preview** — appears when a result is selected and a query is active.
-- **Status** — indexing progress is a thin line under the bar; no numbers on the
-  main page.
-
-## Keyboard
-
-Every action has a key. Keys work from the search box unless noted.
-
-| Key | Action |
+| Flag | Meaning |
 |---|---|
-| <kbd>Alt</kbd>+<kbd>Space</kbd> | show or hide the window (launcher mode; set this in Settings) |
-| <kbd>/</kbd> | focus search, or open the command menu |
-| <kbd>↑</kbd> <kbd>↓</kbd> | move selection (grid: by row) |
-| <kbd>←</kbd> <kbd>→</kbd> | move within a grid row |
-| <kbd>Space</kbd> | Quick Look: preview the selected file |
-| <kbd>Enter</kbd> | open the selected file |
-| <kbd>Shift</kbd>+<kbd>Enter</kbd> | show in folder |
-| <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>C</kbd> | copy the selected path (outside the search box) |
-| <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+click, <kbd>Shift</kbd>+click, <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>A</kbd> | select several results (<kbd>Ctrl+A</kbd> works once you are in the list); <kbd>Esc</kbd> or an arrow key clears the selection |
-| <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>I</kbd> | details for the selected file |
-| <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | toggle grid / list layout |
-| <kbd>⌘,</kbd>/<kbd>Ctrl</kbd>+<kbd>,</kbd> | settings |
-| <kbd>Esc</kbd> | close a dialog, clear the search, then (launcher mode) hide |
+| `--data-dir <DIR>` | Use this data directory. Env: `KENSAKU_DATA_DIR`. |
+| `--json` | Print the raw API result as JSON. |
+| `--no-daemon` | Never start or use the daemon. Reads the index directly. Read-only commands only. |
 
-### Copy or move several results
+### Exit codes
 
-Select more than one result, right-click one of them, and choose **Copy to…** or **Move to…**. Kensaku asks for a folder and never overwrites: a name that is already there becomes `name (1).ext`. Folders in the selection are skipped, and `Ctrl+A` selects the results loaded so far. Moves across drives copy and then delete. Moved files leave the list.
+| Code | Meaning |
+|---|---|
+| 0 | OK |
+| 1 | Failure |
+| 2 | Usage error, or unknown method or key |
+| 3 | No index, or setup incomplete |
+| 4 | Daemon unavailable |
+| 5 | Forbidden |
+| 6 | Busy (conflicts with work already running) |
 
-On Linux, set a shortcut for `kensaku --toggle` in your desktop settings. See [INSTALL.md](INSTALL.md#set-a-quick-shortcut).
+Default output is human-readable. Search prints one result per line as
+`path<TAB>score<TAB>snippet`, which is stable for scripts. Use `--json` when you need
+fields other than those three.
+
+### Commands
+
+| Group | Commands |
+|---|---|
+| Search | `search`, `snippet`, `preview`, `details`, `thumbnail` |
+| Index state | `status [--follow]`, `stats`, `health`, `state` |
+| Setup and folders | `setup [--root ...]`, `setup suggest`, `setup again`, `roots list\|add\|rm`, `exclude list\|add\|rm` |
+| Configuration | `config get [KEY]`, `config set KEY VALUE`, `config path` |
+| Indexing | `index pause\|resume\|rescan [--wait]\|rebuild [--wait]\|cancel` |
+| Maintenance | `doctor [--fix ACTION]`, `packs list\|download PACK\|delete models`, `reset --yes [--remove-packs]`, `remove-data --yes` |
+| Recents and discovery | `home`, `pin PATH`, `record-open PATH`, `dupes [--max-distance N] [--limit N]`, `similar PATH [--limit N]`, `scopes [PREFIX] [--limit N]` |
+| Daemon | `daemon run\|start\|stop\|status\|install\|uninstall\|log` |
+| Agents and API | `mcp`, `serve [--port N] [--allow-writes]`, `connect CLIENT [--write]`, `call METHOD [JSON]`, `methods` |
+| Other | `completions SHELL` |
+
+Run `kensaku <command> --help` for the full flag list.
+
+---
+
+## Searching
+
+```bash
+kensaku search "docker error"
+kensaku search invoice --ext pdf --since 30d
+kensaku search "type:pdf invoice" --path ~/Documents
+kensaku search "resume" --json
+```
+
+| Flag | Meaning |
+|---|---|
+| `-n, --limit <N>` | Results per page. Default 10. |
+| `--offset <N>` | Skip this many ranked results. |
+| `--after <PATH>` | Continue an exhaustive listing after this path (keyset cursor). |
+| `--exhaustive` | Enumerate every match by path instead of ranking. |
+| `--path <DIR>` | Restrict to a folder. Same as `in:"<DIR>"`. |
+| `--ext <EXT>` | Restrict to an extension. Same as `ext:<EXT>`. |
+| `--since <WINDOW>` | Modified within a window: `1h`, `7d`, `30d`. |
+| `--no-snippets` | Skip snippet extraction (faster). |
+
+Multiple words are joined into one query. Quote the query when it contains shell
+characters such as `<`, `>`, or `*`.
+
+The `--json` output is the raw search response. Its fields include `results`, `total`,
+`mode`, `interpretation` (the plain-language chips), `active_filters`, `hints`, and
+`facets`. `facets` counts are computed over the full matched set, not the visible page.
+Ranked paging stops at an offset of 10,000; past that, use `--exhaustive` with `--after`
+to keep going.
+
+### Snippets, previews, and details
+
+```bash
+kensaku snippet ~/Notes/meeting.md --query "action items" --max-tokens 256
+kensaku preview ~/Notes/meeting.md     # text head, image size, or folder count
+kensaku details ~/Photos/IMG_0042.jpg  # image dimensions
+kensaku thumbnail ~/Photos/IMG_0042.jpg  # generate (or reuse) a 240px JPEG and print its path
+```
+
+`snippet` returns a window of at most `--max-tokens` (32 to 1024, default 256) around the
+first match. It never returns a whole large file. `thumbnail` is a cached JPEG; it covers
+image files.
+
+---
+
+## Setup and folders
+
+First-run setup is described in [INSTALL.md](INSTALL.md#first-run). After it, folders and
+exclusions are managed with these commands:
+
+```bash
+kensaku roots list
+kensaku roots add ~/Archive                 # index names and content
+kensaku roots add ~/Media --name-only       # index names and paths only
+kensaku roots rm ~/Archive
+
+kensaku exclude list
+kensaku exclude add node_modules
+kensaku exclude rm node_modules
+```
+
+`roots rm` and `exclude rm` also accept `remove`. Removing a root takes it off the watched
+list; no files are deleted from disk.
+
+---
+
+## Configuration
+
+```bash
+kensaku config path                     # where config.json lives
+kensaku config get                      # the whole config
+kensaku config get ocr_engine           # one key
+kensaku config set ocr_engine indra     # VALUE is parsed as JSON, falling back to a string
+kensaku config set content_depth deep
+```
+
+Keys, defaults, and migrations are in [CONFIG.md](CONFIG.md). Unknown keys are rejected
+with exit code 2.
+
+---
+
+## Indexing and health
+
+```bash
+kensaku status                # indexing progress
+kensaku status --follow       # keep printing until indexing is idle
+kensaku stats                 # query latency, index sizes, runtime statistics
+kensaku health                # daemon, database, index, and watcher health
+kensaku state                 # index counts, roots, and model ids
+
+kensaku index pause           # pause content extraction (renames and deletes still apply)
+kensaku index resume
+kensaku index rescan --wait   # re-crawl watched folders
+kensaku index rebuild --wait  # wipe and rebuild the index
+kensaku index cancel          # stop the first-run scan
+```
+
+### Doctor
+
+```bash
+kensaku doctor                       # run every health check
+kensaku doctor --fix download-ocr-pack
+```
+
+`doctor` names each check that failed and, where one exists, the `--fix` action that
+repairs it. Known actions include `reindex`, `cleanup-storage`, `restart-watcher`,
+`download-models`, `download-ocr-pack`, and `download-indra-pack`. An unknown action is
+rejected with exit code 2.
+
+### Packs
+
+```bash
+kensaku packs list
+kensaku packs download models      # static embedding table
+kensaku packs download ocr         # PP-OCRv6 pack
+kensaku packs download indra       # Indra OCR pack
+kensaku packs download smart       # optional smart embedding model
+kensaku packs download visual      # beta visual pack (not wired into search yet)
+kensaku packs download tessdata    # eng.traineddata for Tesseract
+kensaku packs delete models
+```
+
+Downloads run in the background. Packs are verified against pinned SHA-256 checksums.
+
+---
+
+## Recents, pins, and discovery
+
+```bash
+kensaku home                         # recent files, pins, and saved searches
+kensaku pin ~/Projects/roadmap.md    # pin or unpin a path
+kensaku record-open ~/Projects/roadmap.md   # record an open (feeds frecency ranking)
+kensaku dupes --max-distance 4       # exact duplicates and near-duplicate images
+kensaku similar ~/Photos/IMG_0042.jpg       # visually similar images (needs a visual encoder)
+kensaku scopes ~/Projects            # indexed folders matching a prefix
+```
+
+`similar` depends on a visual encoder that the current build does not provide, so it is
+not active. See [ARCHITECTURE.md §12](ARCHITECTURE.md#12-deliberate-non-goals).
+
+---
+
+## Reset and removal
+
+```bash
+kensaku reset --yes                  # wipe index, database, thumbnails, and settings on next daemon start
+kensaku reset --yes --remove-packs   # also delete downloaded OCR and model packs
+kensaku remove-data --yes            # stop the daemon and delete the data directory now
+```
+
+`reset` requires `--yes`. The wipe runs when the daemon next starts. `remove-data` replaces
+the old desktop uninstall step and is immediate.
+
+---
+
+## Daemon
+
+```bash
+kensaku daemon status
+kensaku daemon start
+kensaku daemon stop
+kensaku daemon run        # foreground; useful under a service manager or for debugging
+kensaku daemon log        # prints the path to daemon.log
+kensaku daemon install    # start at login
+kensaku daemon uninstall
+```
+
+---
+
+## Agents and the API
+
+| Command | Purpose |
+|---|---|
+| `kensaku mcp` | MCP server over stdio. See [AGENTS.md](AGENTS.md). |
+| `kensaku serve [--port 8765]` | Loopback HTTP API under `/v1`, MCP Streamable HTTP, and SSE. Writes need `--allow-writes`. See [API.md](API.md). |
+| `kensaku connect claude-desktop\|claude-code\|cursor [--write]` | Print the MCP config for a client, or merge it into the client's config (with a `.bak` backup). |
+| `kensaku call <METHOD> '<JSON>'` | Call any API method directly. |
+| `kensaku methods` | List every API method. |
+| `kensaku completions bash\|zsh\|fish\|powershell` | Print shell completions. |
+
+```bash
+kensaku call search '{"query":"invoice","limit":5}'
+kensaku methods
+```
+
+---
 
 ## Query language
 
@@ -74,7 +248,7 @@ Everything is optional. Filters never replace the text; they narrow the set.
 | `type:pdf` | category: `image`, `doc`, `sheet`, `presentation`, `code`, `video`, `audio`, `archive`, `dir`, or an extension |
 | `ext:rs` | exact extension |
 | `in:~/Projects` | scope to a folder (quote paths with spaces) |
-| `path:src-tauri` | substring match on the path |
+| `path:src` | substring match on the path |
 | `modified:<7d` | changed within a window: `1h`, `7d`, `30d`, `7d..30d` |
 | `size:>2mb` | size range: `>`, `<`, or `a..b` (`kb`, `mb`, `gb`) |
 | `is:image`, `is:dir` | aliases for common categories |
@@ -102,9 +276,9 @@ re:"TODO|FIXME" ext:rs
 ### Plain language
 
 Kensaku compiles common phrasing locally, without a model. Every inference is
-shown as a removable chip above the results; removing a chip removes the words
-that produced it. If the query already contains an explicit `filter:`, the
-compiler leaves it alone.
+reported in the `interpretation` field of the JSON search output, so you can see which
+words became filters. If the query already contains an explicit `filter:`, the compiler leaves
+it alone.
 
 | You type | It becomes |
 |---|---|
@@ -119,42 +293,9 @@ Time words: `today`, `yesterday`, `last week`, `last month`, `last year`.
 Size words: `big`/`large`/`huge` (>100 MB), `small`/`tiny` (<1 MB), and
 `under 5 MB` / `over 10 MB`.
 
-**Aliases.** Personal vocabulary lives in Settings → Search → Aliases. The
+**Aliases.** Personal vocabulary lives in the `aliases` config key. The
 defaults include `resume → cv`, `invoice → receipt, bill`, and
-`screenshot → capture`; aliases compile to a case-insensitive OR and appear as a
-removable chip.
-
-**Facet counts.** Category chips show counts from the server over the full
-matched set, not just the visible page. The response also carries language,
-place, time, and size counts for future facet UI.
-
-### Home, pins, and saved searches
-
-An empty search box shows pinned files, recent files, saved searches, and a few
-suggested queries. Pin a result from the home rows; save the current query with
-the bookmark button next to **Sort**. Saved searches store the query and sort and
-appear on the home screen.
-
-### Facets and pagination
-
-Category chips show server-side counts over the full matched set. Click a chip to
-include a category; **Alt-click** to exclude it. The selection is OR within the
-category row and AND against the text query. When more ranked results exist, a
-**Load more** control appends the next page.
-
-Version groups appear as one row with a `N versions` badge (for example
-`resume`, `resume_v2`, `resume_final` in the same folder). Near-identical
-screenshots taken within ten minutes in the same folder also collapse into one
-row; the badge count is the burst size. Existing images are grouped in the
-background 50 at a time, and `/dupes` shows the same screenshot bursts.
-
-### Scopes and sort
-
-- Type `@` to pick a folder from the index; the choice inserts `in:"<path>"`.
-- Type `/` for the command menu (filters, `/dupes`, `/reindex`, `/doctor`, `/settings`).
-- When results are showing, the **Sort** control offers `Best match`, `Newest`,
-  `Oldest`, `Largest`, and `Name`. Sorting is applied server-side before the
-  result limit; `Best match` keeps the fused relevance order.
+`screenshot → capture`; aliases compile to a case-insensitive OR.
 
 ### How ranking works
 
@@ -168,38 +309,7 @@ doesn't return vaguely related documents.
 
 Results are deterministic: score, then path.
 
-## Settings
-
-> **Setup (shipped):** the guided first run covers watched folders, exclusions,
-> preferences (theme, interface language, window mode, shortcut), optional
-> OCR/model downloads, and the first scan, ending with a Done summary before the
-> main window opens. Settings shows current values and offers **About → Run setup
-> again**; model/OCR downloads are acquired in setup, and Settings shows installed
-> status only. Later launches stay search-first.
-
-- **General** — theme (`light` / `dark`), interface language, global shortcut,
-  max results, start at login, window mode, and **Keep running when closed**.
-  The shortcut field records a combo when you click it and press the keys
-  (Esc cancels).
-- **Folders** — watched roots, add/remove, drag-and-drop.
-- **Exclusions** — presets (Developer, Creative, All-round), directories,
-  extensions.
-- **Search** — thumbnails, grid/list layout, semantic toggle, OCR engine and
-  language picker, crawl mode (`full` / `balanced` / `eco`), pause indexing,
-  aliases, and the filter cheat sheet.
-- **Meaning search** — active model, vector tier size and readiness, the f32
-  table switch, embed-queue depth, **Re-embed**, and model files. Downloads are
-  acquired in setup; use **About → Run setup again**.
-- **Agents** — MCP config, one-click connect for Claude Desktop/Code and Cursor,
-  the HTTP token, and CLI examples. External format extractors are config-only;
-  see [EXTRACTORS.md](EXTRACTORS.md).
-- **Health** — on-demand Doctor checks (config writability, DB integrity, index
-  size, semantic units, watched roots, watcher health, inotify limit, model
-  files, OCR, external extractors, crash log, version), Stats for Nerds
-  (p50/p95/p99, index composition, ingestion phase/rate/queue, uptime, RSS,
-  model ids), and the Beta section (visual pack download).
-- **About** — version, update controls and release notes, report-an-issue, and
-  **Reset everything**.
+---
 
 ## Indexing behavior
 
@@ -210,11 +320,7 @@ Results are deterministic: score, then path.
 - **Incremental** — unchanged files (same size + mtime) are not re-read.
 - **Renames** are tracked by `(device, inode)`, so moves do not duplicate entries.
 - **Startup** is search-first: the snapshot loads, then a stat-only reconcile runs
-  in the background. This applies **after the first completed scan**; the guided
-  first run waits for the initial scan and ends with a Done screen. The scanning
-  screen shows files, documents, embedded units, a progress bar, and an ETA
-  during metadata indexing and text extraction. Until it finishes the app reports
-  how old the index is.
+  in the background. The first `setup --wait` returns once the initial scan is done.
 - **Unavailable roots** (unplugged drive, unmounted share) are preserved, not pruned.
 - **Content policy** — text is extracted for files up to **100 MB**; up to
   **4 MB** of text is indexed per document, and up to **48** semantic units
@@ -225,64 +331,16 @@ Results are deterministic: score, then path.
 - **Documents** — PDF, DOCX/PPTX/XLSX, EPUB/ODT, RTF; malformed files are skipped
   after their timeout. Scanned PDFs are OCR'd one page at a time instead of
   decoding the whole document up front.
-- **Images** — OCR runs with PP-OCRv6 by default, on a bundled ONNX Runtime;
-  the optional Indra engine (higher quality, ~27 MB pack) can be picked in
-  setup or Settings, and Tesseract with language data is the fallback where
-  ONNX cannot run (Intel Macs, or a `--no-default-features` build). Tesseract
-  languages are selectable in Settings → Search. The setup flow offers
-  `eng.traineddata` as an optional pack; Settings shows engine status and links
-  to **Run setup again**. The toggle controls whether image text is indexed,
-  and saving re-scans existing images. Thumbnails and dimensions are cached;
-  near-duplicates use a perceptual hash, and screenshot bursts also compare OCR
-  line overlap so a shared sidebar does not merge distinct pages.
+- **Images** — OCR runs with PP-OCRv6 by default, on ONNX Runtime; the optional Indra
+  engine (higher quality, ~27 MB pack) is selected with `setup --ocr-engine` or
+  `config set ocr_engine`. Tesseract with language data is the fallback where ONNX
+  cannot run (Intel Macs, or a build without `accurate-ocr`). Set `ocr_languages` for
+  Tesseract. Thumbnails and dimensions are cached; near-duplicates use a perceptual hash,
+  and screenshot bursts also compare OCR line overlap so a shared sidebar does not merge
+  distinct pages.
 - **Retries** — a file that fails extraction is retried at most three times and
   is not re-decoded forever. The counter resets when the file changes or the
   OCR settings change.
 - **Cloud placeholders** (Windows OneDrive/iCloud, and macOS iCloud Drive via
   the APFS `SF_DATALESS` flag) are indexed by name only, so reading doesn't
-  hydrate the file. Their sparse folders are listed but not descended into,
-  and results-grid previews never download from the cloud.
-
-## Agents
-
-See [`AGENTS.md`](AGENTS.md). The short version:
-
-```bash
-kensaku-cli search "docker error" --json --limit 10
-kensaku-cli state --json
-kensaku-cli mcp
-```
-
-More agent surfaces:
-
-```bash
-# One-click connect (writes the client's config, with a .bak backup):
-kensaku-cli connect claude-desktop --write   # or claude-code / cursor
-kensaku-cli connect cursor                   # prints the JSON snippet instead
-
-# Loopback HTTP/SSE transport for MCP clients (bearer token in
-# <config>/http.token; printed once on startup):
-kensaku-cli serve --port 8765
-```
-
-`serve` exposes `/mcp`, `/health`, `/search`, and `/events` only. There is no
-`/ask` route and no chat endpoint; Kensaku does not bundle or call an LLM.
-
-## Commands
-
-Type `/` in the search box to open the command menu, then filter and press Enter:
-
-| Command | Action |
-|---|---|
-| `/images` | Filter to images |
-| `/pdf` | Filter to PDF files |
-| `/docs` | Filter to documents |
-| `/code` | Filter to source and config files |
-| `/media` | Filter to audio and video |
-| `/recent` | Files changed in the last 7 days |
-| `/errors` | Search for error text |
-| `/diagrams` | Search for diagrams |
-| `/dupes` | Open the duplicate review view |
-| `/reindex` | Re-scan watched folders |
-| `/doctor` | Print an index health summary |
-| `/settings` | Open Settings |
+  hydrate the file. Their sparse folders are listed but not descended into.

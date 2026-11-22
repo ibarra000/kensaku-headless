@@ -1,75 +1,85 @@
 # Architecture
 
-> Status: shipped `v1.0.16`. This documents the code in this repository, not a
-> future plan. Anything marked **not shipped** is called out explicitly.
+> Status: `2.0.0-dev`. This documents the code in this repository, not a future
+> plan. Anything marked **not shipped** is called out explicitly.
 
-Kensaku is a local index with four retrieval tiers and three clients: the desktop
-app, the CLI, and an MCP server. There is one Rust library crate (package
-`kensaku`, library `kensaku_lib`) plus a small CLI workspace (`cli/`) with
-`kensaku-cli`, `kensaku-daemon`, and the optional `kensaku-quick` UI, and a React
-frontend. No indexing logic lives in the webview.
+Kensaku is a local index with four retrieval tiers and a headless command-line
+program. The Rust workspace has two crates:
+
+- `crates/kensaku-core` (library `kensaku_core`) holds the index, extraction, OCR,
+  query pipeline, daemon, API, and the MCP and HTTP servers.
+- `crates/kensaku` builds one binary, `kensaku`: the CLI, the daemon launcher, and the
+  entry points for the MCP and HTTP servers.
+
+There is no GUI and no webview. Indexing logic lives only in `kensaku-core`, and every
+client reaches it through the same API.
 
 ## 1. Process model
 
-| Process | Built from | Role |
+| Process | Started by | Role |
 |---|---|---|
-| `kensaku` | `src-tauri/` (Tauri 2) | Desktop app. Hosts the indexer in-process on Windows; on Unix it can start the daemon sidecar. |
-| `kensaku-daemon` | `cli/src/bin/kensaku-daemon.rs` | Owns a warm index for CLI/MCP clients. Unix only in practice. |
-| `kensaku-cli` | `cli/src/main.rs` | `search`, `state`, `mcp`, `serve`, `connect`. |
+| `kensaku daemon run` | `kensaku daemon start`, auto-spawned by any command, or a start-at-login entry | The index owner. Holds the writer lock, runs the crawl and watcher, serves the API over JSON-RPC. |
+| `kensaku <command>` | the user or a script | A thin client. Sends one API call to the daemon and prints the result. |
+| `kensaku mcp` | an MCP client | MCP over stdio. Forwards to the daemon when one is running; otherwise reads the index in-process, read-only. |
+| `kensaku serve` | the user or a service manager | Loopback HTTP API (`/v1`), MCP Streamable HTTP, and SSE. Forwards to the daemon. |
 
-**Daemon-first, with a read-only fallback.** On Unix the GUI calls
-`DaemonClient::ensure()`, which pings the socket and, if nobody answers, spawns
-`kensaku-daemon` from next to the app binary or from `PATH`. CLI and MCP prefer
-the daemon too. When it is absent:
+**Daemon-first, with a read-only fallback.** Every command calls
+`daemon::ensure_running()`. That pings the endpoint and, if nothing answers, spawns
+`kensaku daemon run` detached (`crates/kensaku-core/src/daemon/mod.rs`). The binary is
+found next to the running executable, through `KENSAKU_BIN`, or on `PATH`. The daemon's
+output goes to `<data dir>/daemon.log`. The spawn waits up to 15 seconds for the endpoint.
 
-- the GUI uses its in-process `IndexerManager` (the only writer on Windows);
-- CLI and MCP open the index read-only in-process.
+With `--no-daemon`, a read-only command opens the index in-process instead. A command
+that changes state needs the daemon.
 
-The IPC protocol is newline-delimited JSON-RPC 2.0 over a Unix domain socket or
-a namespaced Windows named pipe (`interprocess`). Every request carries the
-token from `<config>/daemon.token` and `protocol_version`; the client checks
-both before executing. The daemon owns `kensaku.lock`; the GUI owns a separate
-`kensaku-gui.lock`, so a second window cannot start even when the daemon is
-running. A second launch writes `window.request` and exits; the running app
-polls it, which is how `--toggle` and normal shortcut launches work on every OS.
+The daemon takes the exclusive writer lock `kensaku.lock` in the data directory when it
+starts (`crates/kensaku-core/src/runtime.rs`). The same lock is taken on Windows, so the
+daemon owns the index on every OS. A second owner gets `AlreadyRunning` and exits.
 
 ```
-┌─────────────┐   ┌─────────────┐   ┌──────────────────┐
-│  Tauri GUI  │   │  kensaku-   │   │  MCP clients     │
-│  (React)    │   │  cli        │   │  (stdio / HTTP)  │
-└──────┬──────┘   └──────┬──────┘   └────────┬─────────┘
-       │ in-process      │ JSON-RPC          │ JSON-RPC / MCP
-       │ or daemon       │                   │
-       ▼                 ▼                   ▼
-┌─────────────────────────────────────────────────────────┐
-│  kensaku-daemon (Unix)  ·  or in-process IndexerManager  │
-│  single writer · token + protocol check · single lock    │
-├──────────────┬──────────────────┬───────────────────────┤
-│ metadata     │ content          │ semantic              │
-│ SQLite WAL   │ Tantivy BM25     │ i8 static table       │
-│ + arena      │ + folded field   │ (+ optional smart)    │
-├──────────────┴──────────────────┴───────────────────────┤
-│ walker · extractors · watcher · embed queue · updater    │
-└─────────────────────────────────────────────────────────┘
+┌───────────────┐  ┌───────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ kensaku CLI   │  │ kensaku mcp   │  │ kensaku serve    │  │ Rust apps        │
+│ (commands)    │  │ (stdio)       │  │ (HTTP /v1, MCP)  │  │ api::Client      │
+└──────┬────────┘  └──────┬────────┘  └────────┬─────────┘  └────────┬─────────┘
+       │ JSON-RPC 2.0 over Unix socket or named pipe, token + protocol v2
+       ▼                  ▼                    ▼                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ kensaku daemon run  (single writer; holds kensaku.lock)                     │
+│ api::METHODS → api::dispatch → ops/*                                        │
+├──────────────────┬───────────────────┬──────────────────────────────────────┤
+│ metadata         │ content           │ semantic                             │
+│ SQLite WAL       │ Tantivy BM25      │ i8 static table (+ optional smart)   │
+│ + arena          │ + folded field    │                                      │
+├──────────────────┴───────────────────┴──────────────────────────────────────┤
+│ walker · extractors · OCR · watcher · embed queue                           │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Windows note: `DaemonClient::ensure()` returns `false` on non-Unix targets, so a
-Windows install runs everything in the GUI process. The CLI still works and
-opens the index read-only.
+The IPC protocol is newline-delimited JSON-RPC 2.0. Each request carries the token from
+`<data dir>/daemon.token` and `protocol_version` (currently 2). The daemon refuses a
+mismatched token or version, so an old daemon and a new client cannot talk. Stop the old
+daemon after an upgrade.
+
+Endpoints are per data directory, so a test's `KENSAKU_DATA_DIR` never collides with the
+real daemon:
+
+| OS | Endpoint |
+|---|---|
+| Unix | `$XDG_RUNTIME_DIR/kensaku-<id>.sock`, falling back to `<data dir>/kensaku.sock` (`<id>` is a short hash of the data directory path) |
+| Windows | named pipe `kensaku-<id>` |
 
 ## 2. On-disk layout
 
-Everything lives under the OS config directory:
+Everything lives under the data directory. Its default is the OS config directory:
 
-| OS | Path |
+| OS | Default path |
 |---|---|
 | Linux | `~/.config/kensaku/` |
 | macOS | `~/Library/Application Support/kensaku/` |
 | Windows | `%APPDATA%\kensaku\` |
 
-`KENSAKU_DATA_DIR` overrides the location. A `portable` or `kensaku.portable`
-marker next to the executable switches everything to `<exe_dir>/data`, which is
-what the Windows portable zip uses.
+`--data-dir` and `KENSAKU_DATA_DIR` override it. A `portable` or `kensaku.portable`
+marker next to the executable switches everything to `<exe_dir>/data`.
 
 | Path | Contents |
 |---|---|
@@ -78,9 +88,13 @@ what the Windows portable zip uses.
 | `index/` | Tantivy content index, schema v4. Old schemas are kept as `index.legacy-*` and rebuilt once. |
 | `models/` | Static embedding table and the optional smart model. |
 | `ocr/`, `ocr-indra/`, `tessdata/` | Downloaded OCR packs and Tesseract language data. |
-| `thumbs/` | 320 px JPEG thumbnails used by the grid and dHash. |
-| `kensaku.log`, `crash.log` | Startup milestones and failure-only crash log. |
-| `daemon.token`, `kensaku.lock`, `kensaku-gui.lock` | IPC/auth and single-instance state. |
+| `thumbs/` | 240 px JPEG thumbnails from the `thumbnail` method. |
+| `kensaku.log`, `crash.log` (`crash.log.1` after rotation) | Startup milestones, and the failure-only crash log. |
+| `daemon.log` | Output of the auto-spawned daemon. |
+| `daemon.token` | Token for the daemon endpoint (32 random bytes, hex). |
+| `http.token` | Bearer token for `kensaku serve`, created on first use (0600 on Unix). |
+| `kensaku.lock` | The writer lock held by the daemon. |
+| `.reset-requested` | Marker for a pending `reset`, applied on the next daemon start. |
 
 The index is sensitive: it contains file names and extracted text. See
 [PRIVACY.md](PRIVACY.md).
@@ -148,7 +162,8 @@ remain post-filters; the metadata check is authoritative.
 The default model is `potion-base-8M`-style static embeddings: tokenize →
 table lookup → weighted mean → normalize. The shipped table is i8 with per-row
 scales (~7.3 MiB); `semantic_f32_table` keeps the f32 form (~30 MB) for
-comparison or rollback. No ONNX graph and no GPU at query time.
+comparison or rollback. No ONNX graph and no GPU at query time. The table is
+fetched with `kensaku packs download models`.
 
 Units are 240-token windows with 48 overlap, up to `content_max_semantic_units`
 (48) per document. Files under the window size get one doc-level unit. Vectors
@@ -171,7 +186,7 @@ hits always rank after exact hits and are marked `ContentFolded`.
 ## 5. Query pipeline
 
 ```
-input → lexer → AST → router → planner → tiers → RRF → rank → snippet → IPC
+input → lexer → AST → router → planner → tiers → RRF → rank → snippet → response
 ```
 
 - **Grammar** (`query/parser.rs`): `type:`, `ext:`, `in:`, `path:`, `modified:`,
@@ -180,7 +195,8 @@ input → lexer → AST → router → planner → tiers → RRF → rank → sn
   parse errors produce a hint, never zero results.
 - **Intent** (`query/intent.rs`): deterministic, local plain-language rules turn
   "screenshots from last week" or "biggest files" into filters and sort. Every
-  inference is a removable chip. No model is involved. Explicit grammar wins.
+  inference is reported in the response's `interpretation` field. No model is
+  involved. Explicit grammar wins.
 - **Scope** (`query/scope_trie.rs`): `in:` resolves through a folded directory
   trie (exact > prefix > fuzzy) and searches a cached DFS range.
 - **Fusion**: reciprocal rank fusion over the tiers, then exact/prefix name
@@ -232,113 +248,155 @@ Three local engines, one selected at a time:
 
 | Engine | Config value | Notes |
 |---|---|---|
-| PP-OCRv6 tiny | `accurate` (default) | ~6.1 MB pack, bundled ONNX Runtime, in-process. |
+| PP-OCRv6 tiny | `accurate` (default) | ~6.1 MB pack, ONNX Runtime loaded at run time, in-process. |
 | Indra | `indra` | ~27 MB pack; deskew, orientation, multi-script routing. |
-| Tesseract | `tesseract` | System binary + language data; fallback where ONNX cannot run (Intel Macs, `--no-default-features`). |
+| Tesseract | `tesseract` | System binary + language data; fallback where ONNX cannot run (Intel Macs, builds without `accurate-ocr`). |
 
-PP-OCRv6 ships in normal builds via the default `accurate-ocr` feature. Installers
-bundle ONNX Runtime 1.31 (Windows, Apple silicon, Linux x64). The Tesseract
-language list is configurable (`ocr_languages`) and exposed in Settings → Search.
-Native platform OCR is **not** implemented.
+PP-OCRv6 ships in normal builds via the default `accurate-ocr` feature. Release
+archives bundle ONNX Runtime 1.31 next to the binary (Linux x64, Apple silicon, Windows
+x64 and ARM64); the Intel macOS archive does not. The Tesseract language list is
+configurable with `ocr_languages`. The daemon repairs a missing selected pack in the
+background when OCR is enabled. Native platform OCR is **not** implemented.
 
 ## 8. Agent surface
 
-Two transports, one read-only contract:
+Two transports, one read-only contract. Both forward to the daemon.
 
-- **MCP over stdio** — `kensaku-cli mcp`, newline-delimited JSON-RPC 2.0. Only
+- **MCP over stdio** — `kensaku mcp`, newline-delimited JSON-RPC 2.0. Only
   protocol messages go to stdout.
-- **Loopback HTTP/SSE** — `kensaku-cli serve [--port 8765]`: MCP Streamable HTTP
-  at `POST /mcp`, `GET /health`, `GET /search?q=`, and an SSE keepalive at
-  `GET /events`. Bearer token in `<config>/http.token` (0600), loopback bind and
-  per-connection peer check. `reindex` is never enabled on this transport.
+- **Loopback HTTP** — `kensaku serve [--port 8765]`, bound to `127.0.0.1`:
 
-Default tools: `health_check`, `search`, `read_snippet`, `index_state`,
-`regex_search`, `find_symbol`, and `similar_images` **only when a real visual
-encoder exists** (it does not in shipped builds). `reindex` is listed only when
-`mcp_allow_reindex = true` and the daemon is running. Search pages are capped at
-50, snippets at 100 characters, token budgets are explicit, and result offsets
-stop at 10,000 with `cursor_limit_reached`.
+  | Route | Purpose |
+  |---|---|
+  | `POST /mcp` | MCP Streamable HTTP (stateless JSON-RPC). |
+  | `GET /health` | Health summary. |
+  | `GET /search?q=` | Search by the `q` query parameter. |
+  | `GET /events` | SSE keepalive (liveness). |
+  | `GET\|POST /v1/<method>` | The full API method table. Access classes are enforced; see below. |
+  | `GET /v1/events` | SSE stream of `status` events while indexing changes. |
+
+  Every request needs `Authorization: Bearer <token>`. The token lives in
+  `<data dir>/http.token`, is created on first use, and is printed at startup. The listener
+  checks the peer address on each connection.
+
+Write methods on `/v1` return `forbidden` unless `kensaku serve --allow-writes` is given.
+`/v1` file-reading methods honor `agent_scoped_roots`.
+
+Default MCP tools: `health_check`, `search`, `read_snippet`, `index_state`,
+`regex_search`, and `find_symbol`. `similar_images` is listed only when a real visual
+encoder exists, which the shipped build does not have. `reindex` is listed only when
+`mcp_allow_reindex = true` and the daemon is running, and it is never enabled on the HTTP
+transport. Search pages are capped at 50, snippets at 100 characters, token budgets are
+explicit, and result offsets stop at 10,000 with `cursor_limit_reached`.
 
 `agent_scoped_roots` restricts results and single-path reads. Paths are resolved
 before comparison, so `..` and symlink escapes do not pass. Credential files and
 excluded extensions are refused even inside a scope. File content is returned as
 data, never instructions. See [AGENTS.md](AGENTS.md).
 
-## 9. Desktop app
+## 9. API, daemon, and errors
 
-Tauri 2 + React 19 + TypeScript. The frontend is presentation only: search,
-home, preview, settings, setup, duplicates, and Stats for Nerds call Tauri
-commands, which forward to the daemon or the in-process indexer.
+The API is one method table, `crates/kensaku-core/src/api/methods.rs` (`METHODS`). Each
+entry has a name, an access class, and a one-line summary:
 
-- **Two window modes.** `app` is a normal decorated window; `launcher` is a tray
-  window with a global summon shortcut that hides on Esc/blur. `app_mode` is
-  storage; `close_to_background` (default `true`) is separate: closing either
-  mode hides the window, destroys the webview, keeps the index warm, and trims
-  the allocator. Quit is explicit (tray or turning the switch off).
-- **Search surface** stays quiet: search field, category chips, results,
-  preview, and a thin indexing line. Sorting, filters, and saved searches are
-  in the result controls.
-- **Grid or list** (`results_view`, default `grid`), 320 px thumbnails, hover
-  details, right-click actions, full keyboard navigation, and `Cmd/Ctrl+Shift+L`
-  to toggle the layout.
-- **Setup** is a guided flow: folders, exclusions, preferences, optional packs,
-  first scan, Done. Downloads happen there; Settings shows status and offers
-  **Run setup again**.
-- **Languages**: English, Simplified Chinese, and Russian, auto-detected or
-  chosen in Settings. Query grammar stays English.
-- **Themes**: light and dark. The first frame resolves the OS theme before
-  paint; `dark` is the fallback when both storage and `matchMedia` fail.
+| Access | Meaning |
+|---|---|
+| `Read` | Reads index state only. |
+| `FileRead` | Reads file contents for a caller-supplied path. HTTP applies the agent scope. |
+| `Write` | Changes config, the index, or downloads data. Disabled on HTTP unless writes are allowed. |
 
-## 10. Updates
+`METHODS` is the source of truth for `kensaku methods`, the HTTP write gate, and
+[API.md](API.md). `api/dispatch.rs` handles every entry, and a test fails when one is
+missing. Nothing else defines a method.
 
-`updater.rs` checks the public GitHub releases API about every 12 hours
-(`auto_update`, default `true`). The request carries no user data. When an
-update is available, Settings → About shows the release notes, asset size, and
-progress; download is bounded, compared with the expected size, and verified
-against the release's `SHA256SUMS`. The installer runs detached and the app
-shuts down cleanly to avoid a process lock. Portable installs are told to
-replace the folder instead of being handed a second installation. Windows
-binaries are Authenticode-signed through SignPath Foundation in the release
-workflow; macOS remains unsigned. See [SIGNING.md](SIGNING.md) and
-[INSTALL.md](INSTALL.md).
+Four ways to reach the table:
+
+| Entry point | Who uses it |
+|---|---|
+| Daemon JSON-RPC | The CLI and the MCP and HTTP servers, through `daemon::call`. |
+| `kensaku call <method> '<json>'` | Scripts and manual use. |
+| HTTP `/v1/<method>` | Non-Rust clients. Gated as described in §8. |
+| `api::Engine` and `api::Client` | Rust code. `Engine` runs the API in-process and owns the index (take the writer lock). `Client` talks to a running daemon. |
+
+Errors have stable codes (`crates/kensaku-core/src/api/error.rs`). The string form is
+part of the contract and appears in JSON-RPC `error.data.code` and in HTTP error bodies.
+
+| Code | Exit | HTTP | Meaning |
+|---|---|---|---|
+| `invalid_params` | 2 | 400 | Missing or malformed parameters. |
+| `method_not_found` | 2 | 404 | No such method. |
+| `no_index` | 3 | 404 | No index exists yet. Run `kensaku setup`. |
+| `not_setup` | 3 | 409 | Setup has not been completed. |
+| `daemon_unavailable` | 4 | 503 | The daemon is not running and could not be started. |
+| `forbidden` | 5 | 403 | Scope, write gating, or token refusal. |
+| `busy` | 6 | 409 | Conflicts with work already in progress. |
+| `internal` | 1 | 500 | Anything else. |
+
+## 10. Releases
+
+`.github/workflows/release.yml` builds `kensaku` on tag pushes (`v*`) for x86_64 Linux,
+aarch64 and x86_64 macOS, and x86_64 and aarch64 Windows. Each target produces one
+archive, `kensaku-<version>-<target>.tar.gz` or `.zip`, with the binary, the ONNX Runtime
+library where one is bundled, and the LICENSE and README. The workflow also writes
+`SHA256SUMS` and creates a draft GitHub release for a maintainer to review.
+
+The Windows `kensaku.exe` is Authenticode-signed through SignPath Foundation in the
+workflow. macOS binaries are not signed or notarised. There is no self-updater: the
+binary does not contact GitHub or any other update service. See
+[RELEASING.md](RELEASING.md) and [SIGNING.md](SIGNING.md).
 
 ## 11. Tests and benchmarks
 
-- **522 Rust test attributes** across `src-tauri/src`, plus frontend `vitest`
-  tests. CI runs `cargo test --all-targets`, `cargo clippy -D warnings`,
-  `tsc --noEmit`, and `bun run build`.
-- **Six benchmark harnesses** in `src-tauri/examples/`: `bench`, `index_bench`,
-  `crawl_bench`, `index_format_bench`, `mem_probe`, and `facet_bench`. Method,
-  corpus, and honest caveats are in [BENCHMARKS.md](BENCHMARKS.md).
+- **About 600 test functions** across `crates/`. CI runs `cargo test --workspace
+  --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+  and `tools/headless-smoke.sh` against a built `kensaku` on Linux, macOS, and Windows.
+- **Eight benchmark harnesses** in `crates/kensaku-core/examples/`: `bench`, `bench_ocr`,
+  `crawl_bench`, `embed`, `facet_bench`, `index_bench`, `index_format_bench`, and
+  `mem_probe`. `make bench BENCH_DIR=...` runs `bench`. Method, corpus, and honest caveats
+  are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## 12. Deliberate non-goals
 
 - No cloud, accounts, telemetry, sync, or cross-device index.
-- No bundled LLM and no in-app chat. Agents bring their own model over MCP.
+- No GUI, desktop shell, or installer.
+- No bundled LLM and no chat. Agents bring their own model over MCP.
 - No write operations through the agent API except the opt-in `reindex`.
-- No visual search in the production search path yet: the Beta tab can download
-  the CLIP pack, but `active_encoder()` is `None` in non-test builds, so the
-  visual tier is skipped and `similar_images` self-hides.
+- No visual search in the production search path yet. The `visual` pack can be
+  downloaded, but `active_encoder()` is `None` in non-test builds, so the visual tier is
+  skipped and `similar_images` self-hides.
 - No native macOS/Windows OCR.
 - No ANN index at desktop scale; exact scan is faster and exact.
-- No macOS code signing or notarisation yet; Windows is Authenticode-signed.
+- No macOS code signing or notarisation yet; the Windows `kensaku.exe` is Authenticode-signed.
 
 ## 13. Module map
 
 ```
-src-tauri/src/
-  agent/        mcp.rs, http.rs, connect.rs, symbols.rs, mod.rs
-  embed/        table, units, queue, provider, smart, visual, model
-  indexer/      arena, metadata, metadata_db, content, walker, watcher,
-                ignore, burst, tokenizer, extract/
+Cargo.toml                 workspace (resolver 3, rust-version 1.98)
+crates/kensaku/src/
+  main.rs       entry point, exit codes
+  args.rs       clap grammar (the CLI surface)
+  run.rs        command execution: daemon call or --no-daemon read path
+  output.rs     human-readable rendering (--json bypasses it)
+crates/kensaku-core/src/
+  api/          methods.rs (METHODS), dispatch.rs, engine.rs, client.rs, error.rs
+  daemon/       mod.rs (client, ensure_running, endpoints), server.rs (daemon side),
+                service.rs (start-at-login: Run key, systemd unit, LaunchAgent)
+  agent/        mcp.rs, http.rs, connect.rs (MCP config for clients), symbols.rs, mod.rs
+  ops/          admin.rs, files.rs, library.rs, search.rs, setup.rs, stats.rs
+  embed/        table, units, queue, provider, smart, visual, model, scanner
+  indexer/      arena, metadata, metadata_db, content, walker, watcher, ignore,
+                burst, tokenizer, extract/
   query/        ast, lexer, parser, router, intent, scope_trie
   search/       fuzzy, mod (fusion, ranking, snippets)
-  ocr.rs, ocr_indra/   OCR engines and packs
-  config.rs, commands.rs, daemon.rs, doctor.rs, updater.rs,
-  main_window.rs, maintenance.rs, preview.rs, cli.rs
-src/            React UI (App, components, locales en/zh/ru)
-cli/            kensaku-cli, kensaku-daemon, optional kensaku-quick
+  ocr.rs, ocr_indra/     OCR engines and packs
+  config.rs     settings, defaults, migrations
+  runtime.rs    writer lock, reset and rebuild markers, start-up sequence
+  maintenance.rs, doctor.rs, models.rs, preview.rs, crashlog.rs, util/
+crates/kensaku-core/vendor/paddleocr_rs_onnx/   vendored crate (patched in the workspace)
+crates/kensaku-core/examples/   benchmark harnesses
+tools/headless-smoke.sh         end-to-end smoke test
 ```
 
-Rule: the webview never owns indexing, extraction, or model state. That boundary
-is what lets the CLI and MCP reuse the same index.
+Rule: the daemon is the only writer. Every client, including the MCP and HTTP servers, goes
+through the same method table, so the CLI, the agent surface, and Rust callers see the same
+behavior.

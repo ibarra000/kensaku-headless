@@ -1,7 +1,6 @@
 name: CI
 
 # Only run for changes that can actually land: PRs and pushes to master.
-# Pushing scratch branches no longer queues two 20-minute Rust jobs.
 on:
   push:
     branches: [master]
@@ -12,46 +11,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  web:
-    name: Web
-    # ubuntu-24.04 is pinned: `ubuntu-latest` will migrate to Ubuntu 26
-    # (actions/runner-images#14748), which would change the toolchain layout
-    # under this job without notice.
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
-      - run: bunx tsc --noEmit
-      - run: bun run test
-      - run: bun run build
-
   rust:
-    name: Rust
-    runs-on: ubuntu-22.04
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     # A compile plus tests takes about 10 minutes. Without a bound, a stalled
     # download or build hangs until the workflow timeout.
-    timeout-minutes: 30
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        uses: ./.github/actions/linux-deps
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98
         with:
           components: clippy
-      # `generate_context!` embeds `frontendDist`, so the web build must exist
-      # before any cargo command compiles the lib.
-      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
         with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
-      - run: bun run build
-      - name: Cache Cargo target directory
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
           cache-on-failure: true
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Headless end-to-end smoke test
+        shell: bash
+        run: |
+          cargo build -p kensaku --locked
+          tools/headless-smoke.sh target/debug/kensaku

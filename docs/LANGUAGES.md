@@ -24,7 +24,7 @@ flowchart TD
 
 Standard Western tokenizers split on whitespace and punctuation. Because CJK scripts do not use spaces between words, standard tokenization renders East Asian text unsearchable. 
 
-Kensaku implements a custom CJK tokenizer (`KensakuTokenizer` in `src-tauri/src/indexer/tokenizer.rs`) that performs **character-class segmentation** and generates an **interleaved unigram + bigram token stream** with exact byte-offset tracking.
+Kensaku implements a custom CJK tokenizer (`KensakuTokenizer` in `crates/kensaku-core/src/indexer/tokenizer.rs`) that performs **character-class segmentation** and generates an **interleaved unigram + bigram token stream** with exact byte-offset tracking.
 
 #### Supported Unicode Blocks
 
@@ -95,7 +95,7 @@ For images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tiff`, `.gif`) and scann
 |---|---|---|---|
 | **Engine Type** | Native Rust ONNX Runtime port | Native Rust ONNX Runtime port | System C++ library binding |
 | **Model Size** | ~27 MB (8 ONNX models) | ~6 MB (compact tiny model) | Depends on system packages |
-| **Download Mode** | On demand when selected | Automatic on first use (setup can pre-fetch) | Installed by user via package manager |
+| **Download Mode** | `kensaku packs download indra` | Automatic when OCR is on and the pack is missing; `kensaku packs download ocr` fetches it directly | Installed by user via package manager; `kensaku packs download tessdata` fetches `eng` data |
 | **Script Routing** | Automatic via `script.onnx` classifier | Single joint multilingual model | Requires `-l` language pack flags |
 | **Supported Scripts** | • Latin & Cyrillic (`rec.onnx`)<br>• CJK (`rec_cjk.onnx`)<br>• RTL / Arabic / Hebrew (`rec_rtl.onnx`)<br>• Indic & World (`rec_world.onnx`) | Latin, Chinese, Japanese, Korean, Cyrillic | Broad language coverage via `tessdata` |
 | **Orientation & Deskew** | Automatic (`orient.onnx`) | Fixed angle detection | Leptonica deskew |

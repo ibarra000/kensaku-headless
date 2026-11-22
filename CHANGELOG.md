@@ -3,6 +3,73 @@
 All notable changes to Kensaku. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning: [SemVer](https://semver.org/).
 
+## [2.0.0] — Unreleased
+
+Breaking: Kensaku is now a headless command-line program. The desktop app is gone.
+
+### Breaking changes
+- **The desktop app is removed.** No window, tray, global shortcut, launcher or
+  desktop-app mode, React UI, light/dark theme, interface languages, grid thumbnails,
+  setup wizard, Settings screens, in-app updater, or installers (NSIS, MSI, DMG,
+  AppImage, deb, rpm, portable zip). Keys that only the desktop app read are still
+  loaded and saved in `config.json` but ignored: `shortcut`, `app_mode`,
+  `close_to_background`, `theme`, `language`, `results_view`, `show_thumbnails`,
+  `auto_update`, `visual_search_beta_enabled`. `max_results` is also no longer read by
+  search; use `--limit`.
+- **One binary.** `kensaku-cli`, `kensaku-daemon`, and `kensaku-quick` are replaced by
+  `kensaku`. MCP client configs must use `"command": "kensaku"` with `"args": ["mcp"]`.
+- **The daemon owns the index on every OS**, including Windows. The Windows app used to
+  run the indexer in-process. Every command starts `kensaku daemon run` on demand, and the
+  daemon holds the writer lock `kensaku.lock`.
+- **Protocol version 2.** The daemon speaks JSON-RPC over one method table. Stop any
+  older daemon before using the new binary: a client and daemon with different protocol
+  versions refuse each other.
+- **Per-data-directory endpoints.** The Unix socket (`$XDG_RUNTIME_DIR/kensaku-<id>.sock`,
+  or `<data dir>/kensaku.sock`) and the Windows named pipe `kensaku-<id>` are derived from
+  the data directory, so different data directories no longer share one endpoint.
+- **Rust 1.98 is required** (`rust-version` in the workspace).
+- **New release artifacts.** One archive per target, `kensaku-<version>-<target>.zip` or
+  `.tar.gz`, with the binary, the ONNX Runtime library (not on Intel macOS), LICENSE, and
+  README. `SHA256SUMS` covers them. The Windows `kensaku.exe` is the only signed artifact.
+- **Removed flags and scripts.** `--toggle`, the GUI `--remove-data` flag, and the reset
+  script are replaced by `kensaku reset --yes [--remove-packs]` and
+  `kensaku remove-data --yes`.
+
+### Added
+- Command set for search (`search`, `snippet`, `preview`, `details`, `thumbnail`),
+  indexing state (`status [--follow]`, `stats`, `health`, `state`), setup and folders
+  (`setup`, `setup suggest|again`, `roots`, `exclude`), configuration (`config get|set|path`),
+  indexing control (`index pause|resume|rescan|rebuild|cancel`), maintenance (`reset`,
+  `remove-data`, `packs list|download|delete`, `doctor [--fix]`), recents and discovery
+  (`home`, `pin`, `record-open`, `dupes`, `similar`, `scopes`), the daemon
+  (`daemon run|start|stop|status|install|uninstall|log`), agents and API (`mcp`, `serve`,
+  `connect`, `call`, `methods`), and `completions`.
+- Global flags `--json`, `--data-dir`, and `--no-daemon`, and stable exit codes 0 to 6
+  (2 usage, 3 no index or setup incomplete, 4 daemon unavailable, 5 forbidden, 6 busy).
+- `kensaku daemon install` starts the daemon at login: a `KensakuDaemon` value under
+  `HKCU\...\Run` on Windows, a systemd user unit on Linux, and the `dev.kensaku.daemon`
+  LaunchAgent on macOS.
+- HTTP API on loopback under `/v1/<method>`, with `/v1/events` as an SSE status stream.
+  Write methods need `kensaku serve --allow-writes`. File-reading methods honor
+  `agent_scoped_roots`.
+- `kensaku call <method> '<json>'` and `kensaku methods` for every API method.
+- Rust API: `api::Engine` runs in-process and takes the writer lock; `api::Client` talks to
+  a running daemon.
+- `tools/headless-smoke.sh` and `make smoke` run the CLI end to end against a throwaway
+  data directory. CI runs it on Linux, macOS, and Windows.
+
+### Changed
+- `kensaku search` prints one result per line as `path<TAB>score<TAB>snippet`; `--json`
+  prints the raw response.
+- Search before setup has been completed exits with code 3.
+- Build from source is `cargo build --release -p kensaku`.
+
+### Removed
+- The React frontend, the Tauri shell, the interface locales (en, zh, ru), the tray,
+  the global shortcut, the launcher and desktop-app window modes, the in-app updater
+  (`updater.rs`), GUI autostart, the NSIS hooks, the grid thumbnails UI, and the Windows
+  per-user installer.
+
 ## [1.0.18] — unreleased
 
 ### Added

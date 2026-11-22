@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/kensaku-core", "crates/kensaku"]
+default-members = ["crates/kensaku-core", "crates/kensaku"]
+
+[workspace.package]
+version = "2.0.0-dev"
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+
+# Vendored paddleocr_rs_onnx 0.2.8 (MIT): share the ONNX environment with
+# Indra OCR, pin sessions to one thread, bound the recognizer session pool,
+# and let the extraction pool own document concurrency (no nested Rayon).
+[patch.crates-io]
+paddleocr_rs_onnx = { path = "crates/kensaku-core/vendor/paddleocr_rs_onnx" }
+
+[profile.release]
+# Thin LTO + parallel codegen units keeps release builds ~2-3x faster than
+# fat LTO with codegen-units = 1, with near-identical runtime performance.
+codegen-units = 16
+lto = "thin"
+opt-level = 3
+strip = true
+
+# Optimize heavy dependencies (image decode, Tantivy, PDF parsing) in dev
+# builds while keeping Kensaku's own code at debug speed. Dropping dependency
+# debug info also cuts several GB from target/debug.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

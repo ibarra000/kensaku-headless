@@ -1,33 +1,40 @@
 # Kensaku for AI agents
 
 Kensaku exposes its index to external agents. It is **read-only by default,
-local-only, and shares the same index as the desktop app** — no API keys and no
+local-only, and shares the same index as the `kensaku` command** — no API keys and no
 outbound network. An opt-in `reindex` tool is the only write action.
 
 Two surfaces, one binary:
 
-- **MCP** over stdio — for Claude Code, Cursor, and any MCP client.
-- **CLI** — for shell-capable agents and one-off queries.
+- **MCP** over stdio — for Claude Code, Cursor, and any MCP client (`kensaku mcp`).
+- **CLI** — for shell-capable agents and one-off queries (`kensaku search --json`, ...).
 
-Both use the same index as the desktop app: `~/.config/kensaku` on Linux,
+Both use the same index as the CLI: `~/.config/kensaku` on Linux,
 `%APPDATA%\kensaku` on Windows, and `~/Library/Application Support/kensaku` on
 macOS. The MCP server pings the daemon and forwards searches/state to it when
 available; with no daemon it opens the index read-only and loads
 metadata/vectors once per session.
 
+For the HTTP API (`kensaku serve`, routes under `/v1`) and the full method table, see
+[API.md](API.md).
+
 ---
 
 ## MCP setup
 
-Use the absolute path if `kensaku-cli` is not on your `PATH`.
+Use the absolute path if `kensaku` is not on your `PATH`.
 
 ```json
 {
   "mcpServers": {
-    "kensaku": { "command": "kensaku-cli", "args": ["mcp"] }
+    "kensaku": { "command": "kensaku", "args": ["mcp"] }
   }
 }
 ```
+
+`kensaku connect <client>` prints this entry for `claude-desktop`, `claude-code`, or
+`cursor`. Add `--write` to merge it into the client's config file; the previous file is
+kept as a `.bak` backup.
 
 Protocol: JSON-RPC 2.0, newline-delimited, over stdin/stdout. Only protocol
 messages are written to stdout; logs go to stderr.
@@ -123,7 +130,7 @@ compiled before execution, and return the same pagination/snippet shape as
 #### `reindex` (opt-in write)
 
 No arguments. Hidden from `tools/list` and disabled by default. To enable it,
-set `"mcp_allow_reindex": true` in config (Settings → Agents) and restart the MCP
+run `kensaku config set mcp_allow_reindex true` and restart the MCP
 client. The daemon re-checks the setting on every call; without a daemon the
 tool is unavailable.
 
@@ -132,17 +139,21 @@ tool is unavailable.
 ## CLI
 
 ```bash
-kensaku-cli search "docker error" --json --limit 10
-kensaku-cli search "type:pdf invoice" --path ~/Documents
-kensaku-cli search 're:"fn \w+"' --ext rs --since 30d
-kensaku-cli search "config" --exhaustive --json
-kensaku-cli state --json
-kensaku-cli mcp
+kensaku search "docker error" --json --limit 10
+kensaku search "type:pdf invoice" --path ~/Documents
+kensaku search 're:"fn \w+"' --ext rs --since 30d
+kensaku search "config" --exhaustive --json
+kensaku state --json
+kensaku mcp
 ```
 
-Default output is `path<TAB>score<TAB>snippet`; `--json` prints the full
-response. Exit codes: `0` ok, `1` runtime failure, `2` usage, `3` no index
-(launch Kensaku once).
+Default search output is `path<TAB>score<TAB>snippet`; `--json` prints the raw
+search response. Exit codes: `0` ok, `1` failure, `2` usage, `3` no index or setup
+incomplete (run `kensaku setup --root <dir>`), `4` daemon unavailable, `5` forbidden,
+`6` busy. Scripts should branch on these codes rather than on message text.
+
+Global flags: `--json`, `--data-dir <DIR>`, and `--no-daemon` (read-only commands
+only, reads the index without the daemon).
 
 ---
 
@@ -150,7 +161,8 @@ response. Exit codes: `0` ok, `1` runtime failure, `2` usage, `3` no index
 
 - **Read-only by default.** No shell and no network. `reindex` is the only
   write tool and requires the explicit config opt-in plus the daemon.
-- Honors the watched folders and exclusions configured in the app.
+- Honors the watched folders and exclusions configured with `kensaku setup`,
+  `kensaku roots`, and `kensaku exclude`.
 - Ranked mode fuses fuzzy filename, BM25 content, and static-vector tiers with
   RRF; semantic-only hits below a model-dependent cosine floor are dropped.
 - `exhaustive` skips the ranked tiers and enumerates by path, capped at 10,000.
@@ -182,18 +194,20 @@ response. Exit codes: `0` ok, `1` runtime failure, `2` usage, `3` no index
 - **Read-only scoping per root** — `agent_scoped_roots` in config restricts
   search results and `read_snippet`/`find_symbol` paths to those roots;
   out-of-scope requests are rejected, not silently trimmed. Paths are resolved
-  before comparison, so `..` and symlink escapes do not pass the check.
-- **One-click connect** — Settings → Agents detects Claude Desktop/Code and
-  Cursor, merges one config entry atomically (with a `.bak` backup); manual
-  JSON stays. Claude Desktop paths follow each platform (`~/Library/
-  Application Support` on macOS, `~/.config` on Linux, `%APPDATA%` on
-  Windows). CLI: `kensaku-cli connect <client> [--write]`.
-- **Loopback HTTP/SSE** — `kensaku-cli serve [--port 8765]`: MCP Streamable
-  HTTP on `POST /mcp` (JSON or SSE), read-only `GET /health`, `GET /search?q=`,
-  and an SSE keepalive at `GET /events`. Bearer token in
-  `<config>/http.token` (0600); loopback bind + per-connection peer check;
+  before comparison, so `..` and symlink escapes do not pass the check. Set it with
+  `kensaku config set agent_scoped_roots '["/home/you/Projects"]'`.
+- **Loopback HTTP** — `kensaku serve [--port 8765]`, bound to `127.0.0.1`:
+  - `POST /mcp` — MCP Streamable HTTP (stateless JSON-RPC).
+  - `GET /health`, `GET /search?q=`, `GET /events` (SSE keepalive).
+  - `GET|POST /v1/<method>` — the full API method table. Write methods need
+    `kensaku serve --allow-writes`.
+  - `GET /v1/events` — SSE stream of `status` events while indexing changes.
+
+  Every request needs `Authorization: Bearer <token>`. The token is in
+  `<data dir>/http.token`, created on first use, and printed at startup.
   `reindex` is never enabled on this transport. There is no `/ask` route and no
-  chat endpoint; Kensaku does not bundle or call an LLM.
+  chat endpoint; Kensaku does not bundle or call an LLM. The method reference is
+  [API.md](API.md).
 
 ## Planned
 

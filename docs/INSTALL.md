@@ -1,197 +1,192 @@
 # Install & build
 
-## Prebuilt bundles
+## Release archives
 
-Download from [Releases](https://github.com/yjid/kensaku/releases).
+Download from [Releases](https://github.com/yjid/kensaku/releases). Each target has
+one archive containing the `kensaku` binary, the ONNX Runtime library used by OCR,
+and the LICENSE and README.
 
-| Platform | Asset | Notes |
+| Target | Asset | Notes |
 |---|---|---|
-| Linux | `kensaku_<ver>_amd64.AppImage` | chmod +x and run; no install needed |
-| Linux | `kensaku_<ver>_amd64.deb` | `sudo apt install ./kensaku_*.deb` |
-| Linux | `kensaku-<ver>-1.x86_64.rpm` | `sudo rpm -i kensaku-*.rpm` |
-| macOS | `kensaku_<ver>_universal.dmg` | Intel + Apple Silicon |
-| Windows | `kensaku_<ver>_x64-setup.exe` or `kensaku_<ver>_x64_en-US.msi` | per-user install |
-| Windows | `kensaku-portable-<ver>-x64.zip` | portable: unzip in a writable folder, run `kensaku.exe`; config/index/data live in `data\` next to the exe, nothing in `%APPDATA%`. Keeps the `portable` marker file in place. |
-| Windows on ARM | `kensaku_<ver>_arm64-setup.exe`, `kensaku_<ver>_arm64_en-US.msi`, `kensaku-portable-<ver>-arm64.zip`, `kensaku-cli-windows-aarch64.exe` | native ARM64 (Snapdragon) builds; same layout as x64 |
-| Agent CLI | `kensaku-cli-{linux,macos,windows}-*` | Standalone CLI/MCP binary for each platform. |
+| Linux x86_64 | `kensaku-<ver>-x86_64-unknown-linux-gnu.tar.gz` | Bundles `libonnxruntime.so`. |
+| macOS Apple silicon | `kensaku-<ver>-aarch64-apple-darwin.tar.gz` | Bundles `libonnxruntime.dylib`. |
+| macOS Intel | `kensaku-<ver>-x86_64-apple-darwin.tar.gz` | No bundled ONNX Runtime. OCR falls back to Tesseract. |
+| Windows x86_64 | `kensaku-<ver>-x86_64-pc-windows-msvc.zip` | Contains `kensaku.exe` and `onnxruntime.dll`. |
+| Windows ARM64 | `kensaku-<ver>-aarch64-pc-windows-msvc.zip` | The ONNX Runtime DLL matches the process architecture. |
 
-### Signing
+Unpack the archive into a folder you control and put the binary on your `PATH`.
+The rest of this page uses `kensaku` for the binary.
 
-**Windows.** Installers, the portable `kensaku.exe` and the Windows CLI are
-Authenticode-signed through [SignPath Foundation](https://signpath.org/), so
-the publisher name appears in the UAC prompt and SmartScreen reputation can
-build. SignPath Foundation vouches that the binary was built from this
-repository; the private key never leaves their HSM. Verify with:
+### Verifying a download
+
+Every release ships `SHA256SUMS`. Check the archive against it before you run it:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing     # Linux, macOS (or: shasum -a 256 -c)
+```
 
 ```powershell
-Get-AuthenticodeSignature .\kensaku_<ver>_x64-setup.exe | Format-List Status, SignerCertificate
+Get-FileHash .\kensaku-<ver>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
-**macOS.** Not signed or notarised yet, so Gatekeeper blocks the first launch.
-Either right-click the app → **Open** → **Open**, or clear the quarantine flag:
+**Windows.** `kensaku.exe` is Authenticode-signed through
+[SignPath Foundation](https://signpath.org/). After unpacking, check it with:
+
+```powershell
+Get-AuthenticodeSignature .\kensaku.exe | Format-List Status, SignerCertificate
+```
+
+**macOS.** Binaries are not signed or notarised yet, so Gatekeeper blocks the first
+run. Clear the quarantine flag on the unpacked binary:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/Kensaku.app
+xattr -d com.apple.quarantine ./kensaku
 ```
 
-**Linux.** No signing step; the AppImage may need `--no-sandbox` on hardened
-distros.
+**Linux.** No signing step. `SHA256SUMS` is the integrity check.
 
-Every release still ships `SHA256SUMS`; verify any platform with
-`sha256sum -c SHA256SUMS`. Build and signing details are in
-[SIGNING.md](SIGNING.md).
+Build and signing details are in [SIGNING.md](SIGNING.md).
 
 ---
 
-## Build prerequisites
+## Build from source
 
-### All platforms
+### Prerequisites
 
-- Rust stable (edition 2024)
-- [Bun](https://bun.sh) 1.1+ (recommended); Node.js 20.19+ also works with npm
-- Git
+- Rust 1.98. The workspace sets `rust-version = "1.98"`, and CI uses `dtolnay/rust-toolchain@1.98`.
 
-### Linux (Debian/Ubuntu)
+  ```bash
+  rustup toolchain install 1.98
+  ```
 
-```bash
-sudo apt update
-sudo apt install -y \
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-  patchelf libgtk-3-dev build-essential curl wget file
-```
+- A C/C++ toolchain for the native dependencies. On Windows that is the Visual Studio
+  Build Tools with the C++ workload. On macOS, `xcode-select --install`.
 
-Fedora:
-
-```bash
-sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel \
-  librsvg2-devel patchelf gtk3-devel
-```
-
-Arch:
-
-```bash
-sudo pacman -S webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf gtk3 base-devel
-```
-
-### macOS
-
-```bash
-xcode-select --install
-```
-
-### Windows
-
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-  with **Desktop development with C++**
-- WebView2 runtime (preinstalled on Windows 10/11)
-
----
-
-## Build
+### Build
 
 ```bash
 git clone https://github.com/yjid/kensaku
 cd kensaku
-bun install
-
-bun run tauri dev        # dev app
-bun run tauri build      # bundles into src-tauri/target/release/bundle/
+cargo +1.98 build --release -p kensaku
 ```
 
-Bundle outputs:
+The binary is written to `target/release/kensaku` (`kensaku.exe` on Windows).
 
-- Linux: `bundle/appimage/`, `bundle/deb/`, `bundle/rpm/`
-- macOS: `bundle/dmg/`, `bundle/macos/`
-- Windows: `bundle/msi/`, `bundle/nsis/`
+To put it on your `PATH` on Linux or macOS:
 
-The release workflow (`.github/workflows/release.yml`) builds all three platforms
-on a `v*` tag and uploads a draft release.
+```bash
+install -m 755 target/release/kensaku ~/.local/bin/kensaku
+```
 
----
+On Windows, copy `target\release\kensaku.exe` into a folder on your `PATH`.
 
-## Development tasks
+The `accurate-ocr` feature (on by default) loads ONNX Runtime at run time (`ort` with
+`load-dynamic`), so a source build does not bundle it. Put the runtime library next to
+`kensaku` (the release archives do this) or point `ORT_DYLIB_PATH` at it. Without the
+library, the PP-OCR path is unavailable and OCR falls back to Tesseract. `kensaku doctor`
+reports it.
 
-A `Makefile` wraps the common commands:
+### Makefile tasks
 
 ```bash
 make            # list tasks
-make install    # dependencies (bun, npm fallback)
-make dev        # Tauri dev app
-make build      # release bundles
-make cli        # agent CLI
-make test       # Rust tests
-make check      # tsc + cargo check
-make fmt        # Rust fmt
-make bench BENCH_DIR=~/Projects
-make data-dir   # where config/index live
-make reset-index# delete index, keep settings
-make reset      # delete all Kensaku data
-make clean      # remove build outputs
+make build      # release build of the kensaku binary
+make test       # cargo test --workspace --all-targets
+make lint       # clippy with warnings as errors
+make fmt        # cargo fmt --all
+make smoke      # end-to-end headless smoke test (throwaway data dir)
+make bench BENCH_DIR=~/Projects   # filename-search benchmark
+make clean      # remove build outputs (not your data)
 ```
 
-`reset` and `reset-index` delete immediately. Quit Kensaku first.
+`tools/headless-smoke.sh` runs against a temporary data directory. It starts its own
+daemon, runs setup and searches, and stops the daemon on exit. It never touches your
+real index.
 
 ---
 
-## The agent CLI
+## Data directory
 
-`kensaku-cli` is a separate binary that shares the same index.
+Everything Kensaku stores lives in one data directory:
+
+| OS | Default path |
+|---|---|
+| Linux | `~/.config/kensaku/` |
+| macOS | `~/Library/Application Support/kensaku/` |
+| Windows | `%APPDATA%\kensaku\` |
+
+Override it with `--data-dir <DIR>` on any command, or with the `KENSAKU_DATA_DIR`
+environment variable. If a file named `portable` (or `kensaku.portable`) sits next to
+the executable, the data directory is `<exe_dir>/data`. Print the active config file
+path with `kensaku config path`.
+
+Contents are listed in [ARCHITECTURE.md §2](ARCHITECTURE.md#2-on-disk-layout).
+
+---
+
+## The daemon
+
+The index has one owner: a background process started with `kensaku daemon run`. It holds
+the exclusive writer lock (`kensaku.lock`) on every OS, including Windows. Every other
+`kensaku` command talks to it and starts it on demand if it is not running.
 
 ```bash
-cargo build --release --manifest-path cli/Cargo.toml
+kensaku daemon status       # whether the daemon is running
+kensaku daemon start        # start in the background if not running
+kensaku daemon stop
+kensaku daemon log          # print the log path (daemon.log in the data directory)
+kensaku daemon run          # run in the foreground (what start launches)
 ```
 
-Install it on your `PATH`:
+Start at login:
 
 ```bash
-# Linux / macOS
-install -m 755 cli/target/release/kensaku-cli ~/.local/bin/kensaku-cli
-
-# Windows (PowerShell)
-Copy-Item cli\target\release\kensaku-cli.exe "$env:USERPROFILE\bin\"
+kensaku daemon install      # register the daemon to start at login
+kensaku daemon uninstall
 ```
 
-Then point your MCP client at it:
+| OS | Registration |
+|---|---|
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `KensakuDaemon` (no UAC) |
+| Linux | systemd user unit `~/.config/systemd/user/kensaku.service` |
+| macOS | LaunchAgent `~/Library/LaunchAgents/dev.kensaku.daemon.plist` (label `dev.kensaku.daemon`) |
 
-```json
-{
-  "mcpServers": {
-    "kensaku": { "command": "kensaku-cli", "args": ["mcp"] }
-  }
-}
-```
+The daemon endpoint is per data directory: a Unix socket under `$XDG_RUNTIME_DIR` (or in the
+data directory), or a named pipe `kensaku-<hash>` on Windows. Requests carry the token in
+`daemon.token`.
 
-If `kensaku-cli` is not on `PATH`, use the absolute path in `command`.
-
-CLI binaries are published as **release assets** alongside the desktop bundles
-(`kensaku-cli-linux-*`, `kensaku-cli-macos-*`, `kensaku-cli-windows-*`), and
-`SHA256SUMS` covers them. Build from source if you prefer.
+If you upgrade from a build that predates protocol v2, stop the old daemon first
+(`kensaku daemon stop`, or end the old `kensaku-daemon` process). A client and daemon
+with different protocol versions refuse each other.
 
 ---
 
 ## OCR
 
-OCR works out of the box. PP-OCRv6 tiny is compiled into normal builds via the
-default `accurate-ocr` feature, and its ~6.1 MB model pack is downloaded on first
-use. Installers bundle ONNX Runtime 1.31 (Windows, Apple silicon, Linux x64).
-Native macOS/Windows OCR is **not** implemented.
+OCR works out of the box. The PP-OCRv6 engine (`accurate`) is compiled into normal
+builds, and its ~6.1 MB model pack is downloaded when OCR is enabled and the pack is
+missing. Release archives bundle ONNX Runtime for Windows, Apple silicon, and Linux x64.
 
-In **Setup → Optional packs** and Settings → Search you pick one engine:
+Pick the engine at setup, or change it later with configuration:
 
-| Engine | Download | Notes |
-|---|---|---|
-| PP-OCRv6 (`accurate`) | ~6.1 MB (detector 1.7 MB, recognizer 4.3 MB, dictionary 27 KB) | Default. Runs in-process on ONNX Runtime. |
-| Indra (`indra`) | ~27 MB (8 models) | Higher quality: deskew, orientation, multi-script routing. |
-| Tesseract (`tesseract`) | System package + `tessdata` | Fallback where ONNX cannot run (Intel Macs, `--no-default-features`). |
+```bash
+kensaku setup --root ~/Documents --ocr-engine indra
+kensaku config set ocr_engine indra
+```
 
-Packs are verified against pinned SHA-256 checksums. Settings → Search shows the
-selected engine's status and lets you choose Tesseract languages. Doctor repeats
-the check. If the PP-OCR/Indra pack is missing, extraction falls back to
-Tesseract.
+| Engine | Value | Download | Notes |
+|---|---|---|---|
+| PP-OCRv6 | `accurate` | ~6.1 MB (`kensaku packs download ocr`) | Default. Runs in-process on ONNX Runtime. |
+| Indra | `indra` | ~27 MB (`kensaku packs download indra`) | Higher quality: deskew, orientation, multi-script routing. |
+| Tesseract | `tesseract` | System binary plus language data | Fallback where ONNX cannot run (Intel Macs, `--no-default-features`). |
 
-Tesseract needs the binary **and** language data. Kensaku can download
-`eng.traineddata` (~4 MB) into its own directory from setup, so you don't need
-root. A system install also works:
+Packs are verified against pinned SHA-256 checksums. If the selected PP-OCR or Indra pack is
+missing, extraction falls back to Tesseract. `kensaku doctor` reports the OCR state.
+
+Tesseract needs the binary **and** language data. `kensaku packs download tessdata`
+fetches `eng.traineddata` (~4 MB) into the data directory, so no root access is needed.
+Use `kensaku config set ocr_languages '["eng","hin"]'` to choose languages. A system
+install also works:
 
 ```bash
 # Linux (Debian/Ubuntu)
@@ -210,103 +205,65 @@ ONNX wrapper is `paddleocr_rs_onnx` (MIT).
 
 ---
 
-## First run
+## Semantic packs
 
-1. Pick folders (Home, Projects, Documents, Downloads).
-2. Choose an exclusion preset (Developer / Creative / All-round).
-3. Set preferences: theme, interface language, window mode (Launcher is the
-   default; Desktop app is one click away), and the global shortcut. Click the
-   shortcut field and press the key combo; Esc cancels.
-4. Optionally download OCR data and the semantic model. Each button shows live
-   state (downloading, progress, ready, or the error).
-5. Start. The first scan shows live counts, a progress bar, and an ETA, then ends
-   with a Done summary; later launches are search-first and instant. You can
-   search while indexing runs.
+The static embedding table used by the meaning tier is a separate download:
 
-The index lives at:
+```bash
+kensaku packs download models   # static embedding table (background)
+kensaku packs download smart    # optional smart embedding model (needs the smart-embeddings build feature)
+kensaku packs download visual   # beta visual-search pack; not wired into search yet
+kensaku packs list              # what is present, and sizes
+kensaku packs delete models     # the only pack that can be deleted
+```
 
-| OS | Path |
-|---|---|
-| Linux | `~/.config/kensaku/` |
-| macOS | `~/Library/Application Support/kensaku/` (config via dirs) |
-| Windows | `%APPDATA%\kensaku\` |
-
-Contents: `config.json`, `metadata.db` (SQLite WAL), `index/` (Tantivy),
-`thumbs/`, optional `models/`, `ocr/`, `ocr-indra/`, `tessdata/`, `kensaku.log`,
-and a failure-only `crash.log`.
+Downloads run in the background. Check progress with `kensaku packs list`.
 
 ---
 
-## Reset
+## First run
 
-Settings → About → **Reset everything** (type `RESET`) deletes the index,
-database, thumbnails, and config, then restarts. Downloaded OCR and model packs
-are kept unless you tick the box to remove them. Uninstall steps are
-[below](#uninstalling).
+The first run needs at least one folder to index:
 
-## Linux
-
-Kensaku ships as an AppImage, a `.deb`, and an `.rpm`. The build is tested on
-Ubuntu 22.04 (X11). Other desktops are not yet verified.
-
-### Set a quick shortcut
-
-Kensaku's own Alt+Space shortcut may not work on Wayland, where desktops block
-global keys for apps. Instead, bind any key to this command:
-
-```
-kensaku --toggle
+```bash
+kensaku setup --root ~/Documents --root ~/Projects --wait
 ```
 
-`--toggle` shows the window if it's hidden and hides it if it's shown. If the
-app isn't running yet, it starts it.
+| Flag | Meaning |
+|---|---|
+| `--root <DIR>` | Index a folder fully: names and content. Repeatable. |
+| `--name-only <DIR>` | Index a folder by name and path only. No text, OCR, or embeddings. Repeatable. |
+| `--exclude <PATTERN>` | Skip matching folders or paths. Repeatable. |
+| `--ocr-engine <ENGINE>` | `tesseract`, `accurate`, or `indra`. |
+| `--wait` | Block until the first scan finishes. Without it, setup returns and the scan continues. |
 
-Use the full path to the app if `kensaku` isn't on your PATH (for an AppImage,
-the path where you saved the file).
+Other setup commands:
 
-- **GNOME:** Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → `+`.
-  Name it "Kensaku", set the command to `kensaku --toggle`, then press your key.
-- **KDE Plasma:** System Settings → Shortcuts → Add New → Global Shortcut → Command/URL.
-  Set the trigger and the command `kensaku --toggle`.
-- **sway:** add `bindsym $mod+space exec kensaku --toggle` to `~/.config/sway/config`, then reload.
-- **i3:** add `bindsym $mod+space exec kensaku --toggle` to `~/.config/i3/config`, then reload.
-- **Hyprland:** add `bind = SUPER, space, exec, kensaku --toggle` to `~/.config/hypr/hyprland.conf`.
+```bash
+kensaku setup suggest       # list common folders worth indexing (Documents, Downloads, ...)
+kensaku setup again         # mark setup incomplete and stop the running scan
+kensaku index cancel        # stop the first-run scan
+```
 
-Pick a key that no other app uses. Kensaku doesn't change or reserve any keys.
+Search before setup has been completed exits with code 3. `kensaku status --follow` shows
+scan progress.
 
-## Uninstalling
+---
 
-Kensaku keeps everything in one data folder, so an uninstall is two steps:
-remove the program, then remove the data. The second step is separate on
-purpose, because it holds your settings and index and it is not something an
-installer should delete without being asked.
+## Reset and removal
 
-| Platform | Remove the program | Remove the data |
-|---|---|---|
-| Windows | Settings → Apps → Kensaku → Uninstall | Removed by the uninstaller |
-| macOS | Drag Kensaku out of Applications | `kensaku --remove-data` |
-| Linux (deb/rpm) | `sudo apt remove kensaku` / `sudo rpm -e kensaku` | `kensaku --remove-data` |
-| Linux (AppImage) | Delete the AppImage file | `kensaku --remove-data` |
+`kensaku reset --yes` deletes the index, metadata database, thumbnails, and settings. The
+daemon applies the wipe on its next start. Downloaded packs are kept unless you add
+`--remove-packs`.
 
-If `kensaku` is not on your PATH, run the same flag against the binary you
-launched, for example `./kensaku.AppImage --remove-data`.
+`kensaku remove-data --yes` stops the daemon and deletes the whole data directory now.
 
-`--remove-data` prints how much it freed. Quit Kensaku first: it deletes all
-data, so it will not run while the files are open.
+To uninstall, remove the start-at-login entry, delete the data, then delete the binary:
 
-On Windows the uninstaller also clears `%LOCALAPPDATA%\com.gochi.kensaku` (webview
-data) and `%TEMP%\kensaku-updates` (staged installers from the in-app
-updater). A **portable** install keeps its data in a `data` folder beside the
-executable. Delete that folder yourself; the uninstaller leaves it alone
-because it is inside a folder you chose.
+```bash
+kensaku daemon uninstall
+kensaku remove-data --yes
+rm ~/.local/bin/kensaku         # or delete the unpacked folder on Windows
+```
 
-Nothing writes outside the data folder, the two locations above, and the
-autostart entry. There is no telemetry, no cloud storage and no registry state
-beyond that entry.
-
-### Reset instead of uninstalling
-
-Settings → About → **Reset everything** clears your settings, index and cached
-data and keeps the app installed. Downloaded OCR and model packs are kept by
-default, so search works again immediately; tick the box in the dialog to remove
-them too.
+Nothing else is written outside the data directory and the start-at-login entry.

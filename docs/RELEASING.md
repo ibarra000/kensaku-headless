@@ -8,13 +8,13 @@ assets explicit.
 
 ```bash
 git checkout master && git pull
-# bump the version in package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json
-# and src-tauri/Cargo.lock; bump cli/Cargo.toml + cli/Cargo.lock when the CLI changes
+# bump [workspace.package] version in the root Cargo.toml (both crates inherit it),
+# then let Cargo update Cargo.lock:
+cargo +1.98 check --workspace
 # update CHANGELOG.md
-bun install
-cargo test --all-targets --manifest-path src-tauri/Cargo.toml
-cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
-npx tsc --noEmit && bun run test && bun run build
+cargo +1.98 test --workspace --all-targets --locked
+cargo +1.98 clippy --workspace --all-targets --locked -- -D warnings
+make smoke
 git add -A && git commit -m "chore(release): vX.Y.Z"
 git push origin master
 ```
@@ -27,41 +27,50 @@ git push origin vX.Y.Z
 gh run watch   # or: gh run list --workflow=release.yml
 ```
 
-`.github/workflows/release.yml` produces artifacts:
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds `kensaku` for five
+targets, packs each one, and signs the Windows binaries. The workflow names archives from
+the tag without the `v`, so use the same version in the tag and in `Cargo.toml`.
 
-| Artifact | Contents |
+| Target | Archive |
 |---|---|
-| `kensaku-linux` | `.deb`, `.rpm`, `.AppImage` |
-| `kensaku-macos` | universal `.dmg` / `.app` |
-| `kensaku-windows` | `.msi`, NSIS `.exe`, portable `.zip` (x64 + ARM64) |
-| `kensaku-cli-{linux,macos,windows}` | `kensaku-cli` binary (including Windows ARM64) |
+| `x86_64-unknown-linux-gnu` | `kensaku-<ver>-x86_64-unknown-linux-gnu.tar.gz` |
+| `aarch64-apple-darwin` | `kensaku-<ver>-aarch64-apple-darwin.tar.gz` |
+| `x86_64-apple-darwin` | `kensaku-<ver>-x86_64-apple-darwin.tar.gz` (no bundled ONNX Runtime) |
+| `x86_64-pc-windows-msvc` | `kensaku-<ver>-x86_64-pc-windows-msvc.zip` |
+| `aarch64-pc-windows-msvc` | `kensaku-<ver>-aarch64-pc-windows-msvc.zip` |
 
-Builds are **unsigned**. See `INSTALL.md` for the user-facing consequences.
+Each archive holds the `kensaku` binary, the ONNX Runtime library (not on Intel macOS),
+and the LICENSE and README. The workflow smoke-tests the packaged binary with `--version`
+and `methods`.
+
+Windows jobs fail if the SignPath variables or the `SIGNPATH_API_TOKEN` secret are
+missing, so an unsigned Windows binary cannot reach a release. See
+[SIGNING.md](SIGNING.md).
 
 ## 3. Review and publish the draft
 
-The tag push builds every platform and assembles a **draft** GitHub release with
-all bundles, the CLI binaries, and `SHA256SUMS`.
+The tag push builds every target and assembles a **draft** GitHub release with all
+archives and `SHA256SUMS`. Re-run failed jobs from the Actions page if needed. The draft step
+runs only for tag pushes.
 
 ```bash
-# wait for the release build
 gh run list --workflow=release.yml --limit 1
-
-# review the draft
 gh release view vX.Y.Z
-gh release download vX.Y.Z -D /tmp/kensaku-release
-(cd /tmp/kensaku-release && sha256sum -c SHA256SUMS)
+
+# check the published hashes
+mkdir -p release-check && gh release download vX.Y.Z -D release-check
+(cd release-check && sha256sum -c SHA256SUMS)
 ```
 
 Check that the expected assets are present:
 
-| Asset | Platform |
+| Asset | Target |
 |---|---|
-| `kensaku_*_amd64.deb`, `kensaku-*.rpm`, `kensaku_*.AppImage` | Linux |
-| `kensaku_*_universal.dmg` | macOS |
-| `kensaku_*_x64-setup.exe`, `kensaku_*_x64_en-US.msi` | Windows |
-| `kensaku_*_arm64-setup.exe`, `kensaku_*_arm64_en-US.msi`, `kensaku-portable-*-{x64,arm64}.zip` | Windows (x64 and ARM64) |
-| `kensaku-cli-linux-*`, `kensaku-cli-macos-*`, `kensaku-cli-windows-*` | Agent CLI |
+| `kensaku-<ver>-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 |
+| `kensaku-<ver>-aarch64-apple-darwin.tar.gz` | macOS Apple silicon |
+| `kensaku-<ver>-x86_64-apple-darwin.tar.gz` | macOS Intel |
+| `kensaku-<ver>-x86_64-pc-windows-msvc.zip` | Windows x86_64 |
+| `kensaku-<ver>-aarch64-pc-windows-msvc.zip` | Windows ARM64 |
 | `SHA256SUMS` | All assets |
 
 Then publish the draft (or edit the notes first):
@@ -70,28 +79,17 @@ Then publish the draft (or edit the notes first):
 gh release edit vX.Y.Z --draft=false --latest
 ```
 
-If the workflow could not create the draft, the manual fallback is:
-
-```bash
-RUN=$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-rm -rf /tmp/kensaku-release && mkdir -p /tmp/kensaku-release
-gh run download "$RUN" -D /tmp/kensaku-release
-find /tmp/kensaku-release -type f -exec sha256sum {} + > /tmp/kensaku-release/SHA256SUMS
-gh release create vX.Y.Z --title "Kensaku vX.Y.Z" --notes-file /tmp/release-notes.md \
-  $(find /tmp/kensaku-release -type f)
-```
-
 ## 4. Verify
 
-- The release page lists all bundles, the CLI binaries, and `SHA256SUMS`.
-- `gh release view vX.Y.Z`
-- Download one bundle, verify its checksum, install it, and launch.
-- Check `kensaku-cli state --json` on a machine with an index.
+- The release page lists all five archives and `SHA256SUMS`.
+- Download one archive, check its checksum, unpack it, and run `kensaku --version`.
+- On a Windows archive, `Get-AuthenticodeSignature .\kensaku.exe` reports `Valid`.
+- Run `kensaku setup --root <dir> --wait` against a throwaway `--data-dir` and check
+  `kensaku search` against it.
 
-## Signing / notarization (not yet)
+## Signing and notarization
 
-Add the secrets and env vars described in the comment block in
-`release.yml`, then re-run the bundle job. macOS notarization needs
-`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-`APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Windows needs
-`WINDOWS_CERTIFICATE` + password (or a `signtool` step).
+- Windows: `kensaku.exe` is signed through SignPath Foundation. The configuration is in
+  [SIGNING.md](SIGNING.md) and `docs/signing/signpath-artifact-config.xml`.
+- macOS: archives are not signed or notarised. Notarisation needs an Apple Developer ID,
+  which the release workflow does not use yet.

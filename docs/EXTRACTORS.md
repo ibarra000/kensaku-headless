@@ -90,7 +90,7 @@ The plugin must:
 3. stay under `max_output_bytes` and `timeout_ms`.
 
 Anything else marks the file failed for this pass; Kensaku logs the reason and
-surfaces it in **Settings → Doctor** (and the daemon stderr), and the file keeps
+surfaces it in `kensaku doctor` (and `daemon.log`), and the file keeps
 its last good indexed text. Output is truncated to the content cap before
 indexing. Fix the plugin and save the extractor config (or run a full reindex)
 to retry.

@@ -11,9 +11,7 @@
   The release workflow uploads directories with actions/upload-artifact,
   which stores them as a ZIP archive, so the root element is <zip-file>.
 
-  The same configuration is reused for three different uploads (the app
-  executable, the installers, and the Windows CLI binary), which is why every
-  element is optional (min-matches="0") and capped at one match.
+  The release workflow uploads one `kensaku.exe` per Windows target.
 
   Do not add description/description-url to <authenticode-sign>: the Open
   Source Code Signing subscription enforces an automatically generated
@@ -21,19 +19,7 @@
 -->
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <zip-file>
-    <pe-file path="kensaku.exe" min-matches="0" max-matches="1">
-      <authenticode-sign />
-    </pe-file>
-
-    <pe-file path="*-setup.exe" min-matches="0" max-matches="1">
-      <authenticode-sign />
-    </pe-file>
-
-    <msi-file path="*.msi" min-matches="0" max-matches="1">
-      <authenticode-sign />
-    </msi-file>
-
-    <pe-file path="kensaku-cli-windows-*.exe" min-matches="0" max-matches="1">
+    <pe-file path="kensaku.exe">
       <authenticode-sign />
     </pe-file>
   </zip-file>

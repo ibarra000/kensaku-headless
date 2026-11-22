@@ -2,7 +2,7 @@
 
 Every number here was measured with a release build unless the row says
 otherwise. Nothing is extrapolated without saying so. The harnesses live in
-`src-tauri/examples/`.
+`crates/kensaku-core/examples/`.
 
 ## Harnesses
 
@@ -19,27 +19,27 @@ otherwise. Nothing is extrapolated without saying so. The harnesses live in
 
 ```bash
 # Query hot path
-cargo run --manifest-path src-tauri/Cargo.toml --example bench --release -- ~/Projects
+cargo run -p kensaku-core --example bench --release -- ~/Projects
 
 # Crawl extraction (optional file cap)
-cargo run --manifest-path src-tauri/Cargo.toml --example index_bench --release -- ~/Pictures 400
+cargo run -p kensaku-core --example index_bench --release -- ~/Pictures 400
 
 # Fresh + incremental crawl in a throwaway index
-cargo run --manifest-path src-tauri/Cargo.toml --example crawl_bench --release -- ~/Pictures
+cargo run -p kensaku-core --example crawl_bench --release -- ~/Pictures
 
 # Index-format comparison (one backend per process)
-cargo run --manifest-path src-tauri/Cargo.toml --example index_format_bench --release -- \
+cargo run -p kensaku-core --example index_format_bench --release -- \
   tantivy 1000000 /tmp/kensaku-k12-tantivy
 
 # Metadata memory at 1M entries
-cargo run --manifest-path src-tauri/Cargo.toml --example mem_probe --release -- 1000000
+cargo run -p kensaku-core --example mem_probe --release -- 1000000
 
 # Metadata + query-path shape
-KENSAKU_SEARCH_BENCH=1 cargo run --manifest-path src-tauri/Cargo.toml \
+KENSAKU_SEARCH_BENCH=1 cargo run -p kensaku-core \
   --example mem_probe --release -- 1000000
 
 # Facet counts at 1M matched results
-cargo run --manifest-path src-tauri/Cargo.toml --example facet_bench --release -- 1000000
+cargo run -p kensaku-core --example facet_bench --release -- 1000000
 ```
 
 Always use `--release`. Debug builds are 10–50× slower. The 100k reference
@@ -85,7 +85,7 @@ image remains pending. It does not write an index or change user configuration.
 ```bash
 export KENSAKU_OCR_PACK_DIR=/path/to/ocr-pack
 export ORT_DYLIB_PATH=/path/to/libonnxruntime
-cargo run --manifest-path src-tauri/Cargo.toml --release --example bench_ocr -- src-tauri/tests/fixtures/ocr-ui-text
+cargo run -p kensaku-core --release --example bench_ocr -- crates/kensaku-core/tests/fixtures/ocr-ui-text
 ```
 
 Compare identical fixture directories and runtime/model versions in separate
@@ -167,7 +167,7 @@ percentiles across runs (each run already aggregates 10 samples):
 
 ```bash
 for _ in $(seq 1 20); do
-  cargo run --manifest-path src-tauri/Cargo.toml --example bench --release -- ~/Projects \
+  cargo run -p kensaku-core --example bench --release -- ~/Projects \
     | awk '/Average across/ {print $(NF-1)}'
 done | sort -n | awk '{a[NR]=$1} END {printf "p50 %.3f ms\np95 %.3f ms\n", a[int(NR*0.5)], a[int(NR*0.95)]}'
 ```
@@ -217,8 +217,7 @@ build-independent.
 | Folded tier, 500 docs (debug) | `invoice` p50 172 µs / p95 262 µs; index growth 1.61× with stored raw text |
 
 The mixed crawl used the fallback embedder; a real install adds the ~7.3 MiB
-i8 table when the semantic pack is installed. Desktop RSS is dominated by the
-OS webview and is not comparable with the indexer-process numbers above.
+i8 table when the semantic pack is installed.
 
 ### OCR quality note
 
@@ -230,7 +229,7 @@ engine load is ~0.2 s in debug; per-image PP-OCR latency is not measured.
 
 ### Not measured or not shipped
 
-- **Visual search / CLIP:** the Beta settings tab can download the pinned pack,
+- **Visual search / CLIP:** `kensaku packs download visual` fetches the pinned pack,
   but no production encoder is wired into search. Similar-image recall and
   latency are unmeasured, and `similar_images` self-hides in shipped builds.
 - **Smart embedding pack:** the code path compiles behind
@@ -255,13 +254,13 @@ Holding a < 15 ms search target at 1M files needs a stronger prefilter
 (trigram/prefix index) or a sharded scan. Treat the 1M figures as a planning
 budget until a real corpus is measured.
 
-## Idle CPU while hidden
+## Idle CPU of the daemon
 
-Sample the hidden process with `pidstat` (Linux):
+Sample the idle daemon process with `pidstat` (Linux):
 
 ```bash
 pidstat -u -p <kensaku-pid> 1 30
 ```
 
 Or read `/proc/<pid>/stat` (utime+stime) twice a second and divide by the number
-of CPUs. Report average %CPU over 30 s while the window is hidden.
+of CPUs. Report average %CPU over 30 s with no client connected.

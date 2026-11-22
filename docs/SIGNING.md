@@ -7,19 +7,20 @@ on a maintainer machine.
 
 | Platform | Artifact | Signed |
 |---|---|---|
-| Windows x64 | `kensaku_<ver>_x64-setup.exe`, `kensaku_<ver>_x64_en-US.msi`, `kensaku.exe` inside the portable zip, `kensaku-cli-windows-x86_64.exe` | Authenticode (SHA-256, timestamped) |
-| Windows ARM64 | the `arm64` equivalents | Authenticode (SHA-256, timestamped) |
-| macOS | `.dmg` / `.app` | **No** — needs an Apple Developer ID certificate and notarisation |
-| Linux | `.deb`, `.rpm`, `.AppImage`, CLI | **No** — verify with `SHA256SUMS` |
+| Windows x86_64 | `kensaku.exe` inside `kensaku-<ver>-x86_64-pc-windows-msvc.zip` | Authenticode (SHA-256, timestamped) |
+| Windows ARM64 | `kensaku.exe` inside `kensaku-<ver>-aarch64-pc-windows-msvc.zip` | Authenticode (SHA-256, timestamped) |
+| macOS | the `kensaku` binary in the `.tar.gz` archives | **No** — needs an Apple Developer ID certificate and notarisation |
+| Linux | the `kensaku` binary in the `.tar.gz` archive | **No** — verify with `SHA256SUMS` |
 
-macOS Gatekeeper and Linux instructions are unchanged; see
+Each Windows archive holds one signed binary. The installers, the portable zip, and the
+separate CLI binaries from 1.x are gone. macOS Gatekeeper instructions are in
 [INSTALL.md](INSTALL.md). `SHA256SUMS` is still published for every release and
 remains the integrity check for all platforms.
 
 ## One-time setup (SignPath + GitHub)
 
 Do this once. The workflow fails fast on Windows if anything is missing, so a
-tag build can never quietly ship unsigned installers.
+tag build can never quietly ship an unsigned binary.
 
 1. Sign in to SignPath and open the Kensaku project created by the Foundation
    acceptance.
@@ -89,35 +90,28 @@ Organization ID shown on the organization page.
 
 ## How the workflow signs
 
-Order matters: signing the app executable *before* bundling means the NSIS and
-MSI installers contain a signed executable, not just a signed wrapper.
+The Windows jobs in `release.yml` run these steps for each target:
 
-1. `tauri build --no-bundle` compiles the app.
-2. `kensaku.exe` is uploaded as a workflow artifact and signed by SignPath.
-3. The signed executable is copied back, then `tauri bundle
-   --no-binary-patching` builds the installers. The flag is required: Tauri
-   otherwise rewrites the executable in place per bundle type, which would
-   invalidate the signature. Kensaku does not use Tauri updater artifacts, so
-   nothing is lost.
-4. The NSIS setup and MSI are signed in a second request.
-5. The portable zip is assembled from the signed executable.
-6. The Windows CLI binary is signed the same way in the CLI job.
+1. `cargo build --release --locked -p kensaku --target <triple>` compiles the binary.
+2. The unsigned `kensaku.exe` is uploaded as a short-lived workflow artifact.
+3. The SignPath GitHub action submits that artifact to the signing policy and waits for
+   the signed file.
+4. The signed `kensaku.exe` is checked with `Get-AuthenticodeSignature`. With
+   `test-signing` the self-signed certificate reports `UnknownError` (untrusted root) even
+   though the signature is intact, so `Valid` and `UnknownError` are accepted there. With
+   `release-signing` only `Valid` is accepted: a certificate that does not chain to a public
+   CA, or a signature that was invalidated after signing, fails the job instead of shipping.
+5. The signed binary replaces the staged one, and the archive is built from it.
 
-Every downloaded signed file is checked with `Get-AuthenticodeSignature`. With
-`test-signing` the self-signed certificate reports `UnknownError` (untrusted
-root) even though the signature is intact, so `Valid` and `UnknownError` are
-accepted there. With `release-signing` only `Valid` is accepted: a certificate
-that does not chain to a public CA, or a signature that was invalidated after
-signing, fails the job instead of shipping. `SHA256SUMS` in the draft release
-is computed after signing, so the published hashes are hashes of the signed
-files.
+`SHA256SUMS` in the draft release is computed after signing, so the published hashes are
+hashes of the signed files.
 
 ## Verifying a download
 
-Windows (PowerShell):
+Unpack the Windows archive, then (PowerShell):
 
 ```powershell
-Get-AuthenticodeSignature .\kensaku_1.0.18_x64-setup.exe |
+Get-AuthenticodeSignature .\kensaku.exe |
   Format-List Status, SignerCertificate, TimeStamperCertificate
 ```
 
@@ -135,5 +129,5 @@ sha256sum -c SHA256SUMS
 `SHA256SUMS` itself is not signed. Pinning a signature over the checksum file
 (CWE-347 in `GHSA-vmrq-73jw-g4q3`) needs a maintainer-held key and a CI signing
 step; SignPath Foundation does not provide detached signatures over arbitrary
-files. The updater currently takes the checksum over TLS from the fixed GitHub
-release path and makes it mandatory.
+files. Check the checksum file against the release page over TLS, and check the Windows
+binary with its Authenticode signature.
