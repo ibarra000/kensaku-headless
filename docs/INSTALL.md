@@ -87,6 +87,7 @@ reports it.
 ```bash
 make            # list tasks
 make build      # release build of the kensaku binary
+make ort        # fetch ONNX Runtime (OCR) next to it, from NuGet
 make test       # cargo test --all-targets
 make lint       # clippy with warnings as errors
 make fmt        # cargo fmt --all
@@ -162,10 +163,10 @@ with different protocol versions refuse each other.
 OCR works out of the box. The PP-OCRv6 engine (`accurate`) is compiled into normal
 builds, and its ~6.1 MB model pack is downloaded when OCR is enabled and the pack is
 missing. Release archives bundle ONNX Runtime for Windows, Apple silicon, and Linux x64.
-Source builds need the library too: take it from the
+Source builds need the library too: `make ort` (or `tools/fetch-onnxruntime.sh`) downloads the
 [`Microsoft.ML.OnnxRuntime`](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.31.0)
-NuGet package (it is a zip; the file is under `runtimes/<rid>/native/`) and put it next to
-`kensaku` or set `ORT_DYLIB_PATH`.
+NuGet package, checks its SHA-256 and puts the library next to `target/release/kensaku`.
+Elsewhere, point `ORT_DYLIB_PATH` at it.
 
 Pick the engine at setup, or change it later with configuration:
 

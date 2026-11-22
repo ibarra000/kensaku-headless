@@ -6,7 +6,7 @@ SHELL := /bin/bash
 BIN := target/release/kensaku
 BENCH_DIR ?= $(HOME)/Projects
 
-.PHONY: help build test lint fmt smoke bench clean
+.PHONY: help build ort test lint fmt smoke bench clean
 
 help: ## Show this help
 	@printf '\nKensaku tasks:\n\n'
@@ -17,6 +17,9 @@ help: ## Show this help
 build: ## Build the kensaku binary (release)
 	cargo build --release -p kensaku
 	@echo "built: $(BIN)"
+
+ort: ## Put ONNX Runtime (for OCR) next to the release binary
+	tools/fetch-onnxruntime.sh "" target/release
 
 test: ## Run the Rust test suite
 	cargo test --all-targets

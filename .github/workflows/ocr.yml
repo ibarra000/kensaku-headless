@@ -15,6 +15,7 @@ on:
       - "crates/kensaku-core/tests/fixtures/ocr-ui-text/**"
       - ".github/workflows/ocr.yml"
       - ".github/actions/onnxruntime/**"
+      - "tools/fetch-onnxruntime.sh"
   push:
     # Post-merge: only real-model jobs catch platform-specific OCR failures.
     branches: ["main"]
