@@ -8,3 +8,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Its ref is the Rust toolchain version (pinned to rust-version), not an action release.
+      - dependency-name: dtolnay/rust-toolchain
