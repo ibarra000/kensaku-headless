@@ -1,6 +1,6 @@
 # Signing
 
-Kensaku's Windows binaries are Authenticode-signed through
+Kensaku Headless's Windows binaries are Authenticode-signed through
 [SignPath Foundation](https://signpath.org/), which issues an open-source code
 signing certificate and keeps the private key on its HSM. Nothing is signed
 on a maintainer machine.
@@ -13,21 +13,45 @@ on a maintainer machine.
 | Linux | the `kensaku` binary in the `.tar.gz` archive | **No** — verify with `SHA256SUMS` |
 
 Each Windows archive holds one signed binary. The installers, the portable zip, and the
-separate CLI binaries from 1.x are gone. macOS Gatekeeper instructions are in
+separate CLI binaries of the original desktop Kensaku are gone. macOS Gatekeeper instructions are in
 [INSTALL.md](INSTALL.md). `SHA256SUMS` is still published for every release and
 remains the integrity check for all platforms.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/),
+certificate by [SignPath Foundation](https://signpath.org/).
+
+- **Committers and reviewers:** [members of this repository](https://github.com/ibarra000/kensaku-headless/graphs/contributors)
+- **Approvers:** [@ibarra000](https://github.com/ibarra000) (repository owner)
+- Only binaries built by the `release.yml` workflow on GitHub-hosted runners, from
+  this repository's source, are submitted for signing. Every signing request
+  for `release-signing` is approved manually by an approver.
+- **Privacy:** Kensaku Headless does not transfer any information to other
+  networked systems unless the user asks it to (downloading an OCR or model
+  pack with `kensaku packs download`, or OCR self-repair when OCR is enabled
+  and its pack is missing). See [PRIVACY.md](PRIVACY.md).
+
+This fork does not reuse the original Kensaku project's SignPath project or
+certificate; it has its own (below).
 
 ## One-time setup (SignPath + GitHub)
 
 Do this once. The workflow fails fast on Windows if anything is missing, so a
 tag build can never quietly ship an unsigned binary.
 
-1. Sign in to SignPath and open the Kensaku project created by the Foundation
-   acceptance.
-2. Connect the GitHub repository (Trusted Build System *GitHub.com*), and
-   install the [SignPath GitHub App](https://github.com/apps/signpath) on
-   `yjid/kensaku`. The Foundation plan requires every job up to the signing
-   request to run on GitHub-hosted runners, which this workflow already does.
+1. **Apply to SignPath Foundation** for `ibarra000/kensaku-headless` at
+   [signpath.org/apply](https://signpath.org/apply). The project must be OSI
+   licensed (MIT), publicly built from source in CI, and publish the code
+   signing policy above. Mention that it is a fork of
+   [yjid/kensaku](https://github.com/yjid/kensaku). Acceptance creates a
+   SignPath organization and project for you.
+2. Sign in to SignPath, open the new project, connect the GitHub repository
+   (Trusted Build System *GitHub.com*), and install the
+   [SignPath GitHub App](https://github.com/apps/signpath) on
+   `ibarra000/kensaku-headless`. The Foundation plan requires every job up to
+   the signing request to run on GitHub-hosted runners, which this workflow
+   already does.
 3. Create an **Artifact Configuration** from
    [`docs/signing/signpath-artifact-config.xml`](signing/signpath-artifact-config.xml)
    and give it the slug `kensaku-binaries`.
@@ -39,17 +63,17 @@ tag build can never quietly ship an unsigned binary.
    | Kind | Name | Value |
    |---|---|---|
    | Variable | `SIGNPATH_ORGANIZATION_ID` | SignPath organization ID |
-   | Variable | `SIGNPATH_PROJECT_SLUG` | Project slug, e.g. `kensaku` |
+   | Variable | `SIGNPATH_PROJECT_SLUG` | Project slug, e.g. `kensaku-headless` |
    | Variable | `SIGNPATH_SIGNING_POLICY_SLUG` | `test-signing` (dry run) or `release-signing` |
    | Variable | `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG` | `kensaku-binaries` |
    | Secret | `SIGNPATH_API_TOKEN` | API token from step 5 |
 
    ```bash
-   gh variable set SIGNPATH_ORGANIZATION_ID --body "<org-id>"
-   gh variable set SIGNPATH_PROJECT_SLUG --body "kensaku"
-   gh variable set SIGNPATH_SIGNING_POLICY_SLUG --body "test-signing"
-   gh variable set SIGNPATH_ARTIFACT_CONFIGURATION_SLUG --body "kensaku-binaries"
-   gh secret set SIGNPATH_API_TOKEN
+   gh variable set SIGNPATH_ORGANIZATION_ID --body "<org-id>" -R ibarra000/kensaku-headless
+   gh variable set SIGNPATH_PROJECT_SLUG --body "kensaku-headless" -R ibarra000/kensaku-headless
+   gh variable set SIGNPATH_SIGNING_POLICY_SLUG --body "test-signing" -R ibarra000/kensaku-headless
+   gh variable set SIGNPATH_ARTIFACT_CONFIGURATION_SLUG --body "kensaku-binaries" -R ibarra000/kensaku-headless
+   gh secret set SIGNPATH_API_TOKEN -R ibarra000/kensaku-headless   # prompts; never put it on the command line
    ```
 
 Copy `SIGNPATH_ORGANIZATION_ID` from the SignPath URL (`/Web/<organization-id>/…`)
@@ -116,7 +140,7 @@ Get-AuthenticodeSignature .\kensaku.exe |
 ```
 
 `Status` should be `Valid` and the signer should be SignPath Foundation
-signing on behalf of the Kensaku project.
+signing on behalf of the Kensaku Headless project.
 
 Any platform:
 

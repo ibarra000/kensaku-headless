@@ -6,9 +6,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting. Please include **Settings → Doctor → Copy report** and
-        **Stats for Nerds → Copy diagnostics** if you can — they answer most
-        environment questions up front.
+        Thanks for reporting. Please include the output of `kensaku doctor --json`
+        and `kensaku stats --json` (plus `kensaku --version`) if you can — they
+        answer most environment questions up front. Relevant lines from the
+        daemon log (`kensaku daemon log` prints its path) help too.
 
   - type: textarea
     id: what-happened
@@ -24,9 +25,8 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Watch ~/Documents
-        2. Wait for indexing to finish
-        3. Search `type:pdf invoice`
+        1. `kensaku setup --root ~/Documents --wait`
+        2. `kensaku search "type:pdf invoice"`
         4. …
     validations:
       required: true
@@ -35,7 +35,8 @@ body:
     id: version
     attributes:
       label: Kensaku version
-      placeholder: "0.3.0"
+      description: Output of `kensaku --version`.
+      placeholder: "kensaku 2.0.0"
     validations:
       required: true
 
@@ -63,7 +64,7 @@ body:
     id: diagnostics
     attributes:
       label: Doctor / diagnostics
-      description: Paste the JSON from Settings → Doctor and Stats for Nerds.
+      description: Paste the output of `kensaku doctor --json` and `kensaku stats --json`.
       render: json
     validations:
       required: false

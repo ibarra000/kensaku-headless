@@ -802,7 +802,7 @@ fn check_ocr() -> DoctorCheck {
                 LABEL,
                 format!("No OCR engine can read images. {tesseract}; {accurate}."),
                 Some(
-                    "Download the PP-OCR pack in Settings → Search, or install Tesseract"
+                    "Run `kensaku packs download ocr`, or install Tesseract"
                         .to_string(),
                 ),
             )

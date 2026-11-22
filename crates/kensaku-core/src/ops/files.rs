@@ -67,7 +67,7 @@ pub fn build_file_preview(path: &str) -> Result<FilePreview, String> {
         .unwrap_or("")
         .to_lowercase();
 
-    // Raster images are previewed by the webview directly. SVG/ICO are handled
+    // Raster images are previewed by the client directly. SVG/ICO are handled
     // the same way (the browser decodes them), but they have no raster
     // dimensions here. This check runs before any extraction so an image can
     // never reach tesseract on preview.

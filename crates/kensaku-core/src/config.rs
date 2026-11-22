@@ -137,21 +137,10 @@ pub struct KensakuConfig {
     pub mcp_allow_reindex: bool,
     #[serde(default = "default_true")]
     pub ocr_enabled: bool,
-    /// How the app presents itself: `launcher` (hide on blur/Esc, tray only,
-    /// tiny footprint) or `app` (stays open, appears in the dock/taskbar).
+    /// Legacy (desktop app): stored for compatibility, ignored headless.
     #[serde(default = "default_app_mode")]
     pub app_mode: String,
-    /// Closing the window keeps the app running in the tray instead of
-    /// quitting, so reopening is instant.
-    ///
-    /// Startup is the expensive part: the metadata database, the full-text
-    /// index and the semantic units all have to be loaded before the first
-    /// query can run. Quitting on close threw that away and paid for it again
-    /// on every open, which on a hundred thousand files is several seconds.
-    /// Staying resident keeps the Rust side warm while the webview is
-    /// destroyed on close, so the idle footprint is the index, not the UI.
-    ///
-    /// Quitting is explicit: the tray menu's Quit item, or turning this off.
+    /// Legacy (desktop app): stored for compatibility, ignored headless.
     #[serde(default = "default_true")]
     pub close_to_background: bool,
     /// OCR backend: `tesseract` (fast default), `accurate` (optional

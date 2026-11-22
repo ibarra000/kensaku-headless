@@ -2,7 +2,8 @@
 name = "kensaku-core"
 version.workspace = true
 description = "Headless local file and content search engine"
-authors = ["yjid"]
+authors = ["yjid", "Kensaku Headless contributors"]
+repository = "https://github.com/ibarra000/kensaku-headless"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

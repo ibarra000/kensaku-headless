@@ -91,7 +91,7 @@ and `kensaku daemon install` starts it at login.
 
 **Does it update itself?**
 No. The binary never contacts GitHub or any update service. Download new releases from the
-[releases page](https://github.com/yjid/kensaku/releases) and check them against
+[releases page](https://github.com/ibarra000/kensaku-headless/releases) and check them against
 `SHA256SUMS`. See [INSTALL.md](INSTALL.md#release-archives).
 
 **Is the binary signed?**

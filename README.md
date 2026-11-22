@@ -2,7 +2,7 @@
   <img src="assets/icon.png" width="112" height="112" alt="Kensaku" />
 </p>
 
-<h1 align="center">Kensaku <span title="kensaku = search, in Japanese">検索</span></h1>
+<h1 align="center">Kensaku Headless <span title="kensaku = search, in Japanese">検索</span></h1>
 
 <p align="center">
   <b>Fast, light, and efficient. Find anything on your computer.</b>
@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/yjid/kensaku/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yjid/kensaku?style=for-the-badge" /></a>
-  <a href="https://github.com/yjid/kensaku/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/yjid/kensaku/total?style=for-the-badge" /></a>
+  <a href="https://github.com/ibarra000/kensaku-headless/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ibarra000/kensaku-headless?style=for-the-badge" /></a>
+  <a href="https://github.com/ibarra000/kensaku-headless/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/ibarra000/kensaku-headless/total?style=for-the-badge" /></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-111111?style=for-the-badge" /></a>
-  <a href="https://github.com/yjid/kensaku/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/yjid/kensaku/ci.yml?branch=master&style=for-the-badge" /></a>
+  <a href="https://github.com/ibarra000/kensaku-headless/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ibarra000/kensaku-headless/ci.yml?branch=main&style=for-the-badge" /></a>
 </p>
 
 <p align="center">
@@ -34,9 +34,16 @@
 
 ---
 
-Kensaku is a headless local search tool. A background daemon owns the index, and
-the `kensaku` command, the MCP server, and the loopback HTTP API all talk to it.
-There is no GUI.
+Kensaku Headless is a headless local search tool. A background daemon owns the
+index, and the `kensaku` command, the MCP server, the loopback HTTP API, and
+Rust applications (through `kensaku-core`) all talk to it. There is no GUI:
+it is built to be embedded in other applications and scripts.
+
+> **Credit.** Kensaku Headless is based on [Kensaku](https://github.com/yjid/kensaku)
+> by [Yash Jangid (@yjid)](https://github.com/yjid), MIT-licensed. The indexing,
+> search, OCR and agent engine are theirs; this fork removes the desktop app and
+> exposes everything through the CLI, daemon, HTTP and Rust APIs. If you want
+> the desktop app, use the original project.
 
 ## Find it the way you remember it
 
@@ -121,7 +128,7 @@ Full reference: [docs/USAGE.md](docs/USAGE.md) · Language & format support: [do
 ## Install
 
 Every release attaches one archive per platform to the
-[latest release](https://github.com/yjid/kensaku/releases/latest). Each archive
+[latest release](https://github.com/ibarra000/kensaku-headless/releases/latest). Each archive
 contains the `kensaku` binary, the ONNX Runtime library it loads for OCR, and the
 LICENSE and README.
 
@@ -145,7 +152,7 @@ Unpack the archive, then run `xattr -d com.apple.quarantine ./kensaku` if macOS 
 ### Build from source
 
 ```bash
-git clone https://github.com/yjid/kensaku
+git clone https://github.com/ibarra000/kensaku-headless
 cd kensaku
 cargo build --release -p kensaku
 ./target/release/kensaku --help
@@ -267,29 +274,31 @@ Full threat model: [SECURITY.md](SECURITY.md).
 
 ## What might come next
 
-Kensaku is actively built, and the roadmap bends toward what people ask for. Some directions being explored:
+Directions for the headless build, in no fixed order:
 
-- **Internet quick search.** For the things your files can't answer — opt-in, off by default, clearly separated from local results so the local-first promise stays intact. → [vote & discuss](https://github.com/yjid/kensaku/discussions/38)
-- **macOS signing and notarization.** Windows binaries are Authenticode-signed now; an Apple Developer ID is the missing piece for a warning-free first launch on macOS. → [vote & discuss](https://github.com/yjid/kensaku/discussions/40)
-- **Visual and related-file agents.** Text-to-image and similar-image lookup once a real visual encoder is wired into search; `find_related` for same-stem/import/neighbour lookups. → [vote & discuss](https://github.com/yjid/kensaku/discussions/39)
+- **Typed client libraries.** Thin wrappers over the HTTP `/v1` API for Python and TypeScript, generated from the method table.
+- **Push notifications over the daemon socket.** Stream status and watcher events to long-lived clients instead of polling `get_status`.
+- **More CLI coverage of agent tools.** `regex` and `symbol` commands alongside the existing `search`.
+- **macOS signing and notarization.** An Apple Developer ID for warning-free first runs.
+- **Visual and related-file lookups.** Text-to-image and similar-image search once a real visual encoder is wired in; `find_related` for same-stem/import/neighbour lookups.
 
-None of this ships on a promise — it ships in the order the community pushes. **You tell us:** open a [discussion](https://github.com/yjid/kensaku/discussions) with your use case, or upvote an existing idea in the [issue tracker](https://github.com/yjid/kensaku/issues). The loudest real-world need gets the next slot.
+Open a [discussion](https://github.com/ibarra000/kensaku-headless/discussions) with your use case, or upvote an idea in the [issue tracker](https://github.com/ibarra000/kensaku-headless/issues).
 
 ## Contributing
 
-Kensaku is young, MIT-licensed, and built by people who wanted a better search tool. Every kind of help moves it forward:
+Kensaku Headless is MIT-licensed and builds on the original [Kensaku](https://github.com/yjid/kensaku). Every kind of help moves it forward:
 
 - **Use it and break it.** Bug reports with steps to reproduce are the single most valuable contribution right now — especially from macOS and Linux users.
-- **Shape the roadmap.** Feature ideas land in [Discussions](https://github.com/yjid/kensaku/discussions); the ones with real use cases behind them get built first.
-- **Good first issues.** Check the [issue tracker](https://github.com/yjid/kensaku/issues) for tasks scoped for a first contribution.
+- **Shape the roadmap.** Feature ideas land in [Discussions](https://github.com/ibarra000/kensaku-headless/discussions); the ones with real use cases behind them get built first.
+- **Good first issues.** Check the [issue tracker](https://github.com/ibarra000/kensaku-headless/issues) for tasks scoped for a first contribution.
 - **Search quality.** Ranking, typo tolerance, and new extractors ([docs/EXTRACTORS.md](docs/EXTRACTORS.md) shows how to add one).
 - **Agents and integrations.** MCP tooling and guides ([docs/AGENTS.md](docs/AGENTS.md)).
 - **Docs and examples.** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) has the setup: `cargo build -p kensaku`, `make test`, `make lint`, and `make smoke`. CI runs the workspace tests and clippy on Linux, macOS, and Windows, plus the headless smoke test.
 - **Security.** Please report vulnerabilities privately via [SECURITY.md](SECURITY.md).
 
-If Kensaku saves you ten minutes, [star the repository](https://github.com/yjid/kensaku/stargazers) — it's the only marketing an independent tool has, and it's how the next contributor finds us.
+If Kensaku saves you ten minutes, [star the repository](https://github.com/ibarra000/kensaku-headless/stargazers) — it's the only marketing an independent tool has, and it's how the next contributor finds us.
 
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=yjid/kensaku&type=Date)](https://star-history.com/#yjid/kensaku&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=ibarra000/kensaku-headless&type=Date)](https://star-history.com/#ibarra000/kensaku-headless&Date)

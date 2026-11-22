@@ -1,4 +1,4 @@
-//! Process and index statistics ("Stats for Nerds").
+//! Process and index statistics (`get_stats`).
 
 use crate::config::KensakuConfig;
 use std::collections::VecDeque;

@@ -1,11 +1,16 @@
 # Changelog
 
-All notable changes to Kensaku. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+All notable changes to Kensaku Headless. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning: [SemVer](https://semver.org/).
 
 ## [2.0.0] — Unreleased
 
 Breaking: Kensaku is now a headless command-line program. The desktop app is gone.
+
+Kensaku Headless is a fork of [Kensaku](https://github.com/yjid/kensaku) by Yash Jangid
+(@yjid), developed at [ibarra000/kensaku-headless](https://github.com/ibarra000/kensaku-headless).
+This is its first release; the entries below 2.0.0 are the original project's history,
+kept for reference.
 
 ### Breaking changes
 - **The desktop app is removed.** No window, tray, global shortcut, launcher or

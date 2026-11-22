@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 description = "Headless Kensaku: CLI, index daemon, MCP and HTTP servers"
 publish = false
+authors = ["yjid", "Kensaku Headless contributors"]
+repository = "https://github.com/ibarra000/kensaku-headless"
 
 [[bin]]
 name = "kensaku"

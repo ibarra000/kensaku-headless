@@ -13,7 +13,7 @@ Thanks for helping. Bug reports, docs fixes, and focused PRs are all welcome.
 ## Setup
 
 ```bash
-git clone https://github.com/yjid/kensaku
+git clone https://github.com/ibarra000/kensaku-headless
 cd kensaku
 rustup toolchain install 1.98
 cargo +1.98 build -p kensaku

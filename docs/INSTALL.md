@@ -2,7 +2,7 @@
 
 ## Release archives
 
-Download from [Releases](https://github.com/yjid/kensaku/releases). Each target has
+Download from [Releases](https://github.com/ibarra000/kensaku-headless/releases). Each target has
 one archive containing the `kensaku` binary, the ONNX Runtime library used by OCR,
 and the LICENSE and README.
 
@@ -65,7 +65,7 @@ Build and signing details are in [SIGNING.md](SIGNING.md).
 ### Build
 
 ```bash
-git clone https://github.com/yjid/kensaku
+git clone https://github.com/ibarra000/kensaku-headless
 cd kensaku
 cargo +1.98 build --release -p kensaku
 ```

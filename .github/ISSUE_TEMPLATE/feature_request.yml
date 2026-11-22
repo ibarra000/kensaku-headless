@@ -6,11 +6,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please check the existing issues and [docs/ARCHITECTURE.md](https://github.com/yjid/kensaku/blob/master/docs/ARCHITECTURE.md)
+        Please check the existing issues and [docs/ARCHITECTURE.md](https://github.com/ibarra000/kensaku-headless/blob/main/docs/ARCHITECTURE.md)
         first — many ideas are already planned or deliberately deferred.
 
-        Kensaku is a local search index and a read-only backend for agents. It does
-        not include an LLM, cloud sync, or telemetry.
+        Kensaku Headless is a local search engine with a CLI, daemon, HTTP and Rust
+        API, and a read-only backend for agents. It has no GUI and does not include
+        an LLM, cloud sync, or telemetry. Desktop-app requests belong in the
+        original project: https://github.com/yjid/kensaku
 
   - type: textarea
     id: problem
@@ -24,7 +26,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: What would you like to see? Be concrete about the interaction.
+      description: What would you like to see? Be concrete: command, API method, parameters, output.
     validations:
       required: true
 
@@ -46,9 +48,10 @@ body:
         - Indexing / watcher
         - Documents / OCR
         - Images
-        - UI / themes
-        - Settings / diagnostics
-        - Agent CLI / MCP
+        - CLI
+        - Daemon / HTTP / Rust API
+        - Config / diagnostics
+        - Agents / MCP
         - Packaging / install
         - Other
     validations:
