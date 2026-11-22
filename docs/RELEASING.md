@@ -10,10 +10,10 @@ assets explicit.
 git checkout master && git pull
 # bump [workspace.package] version in the root Cargo.toml (both crates inherit it),
 # then let Cargo update Cargo.lock:
-cargo +1.98 check --workspace
+cargo +1.98 check
 # update CHANGELOG.md
-cargo +1.98 test --workspace --all-targets --locked
-cargo +1.98 clippy --workspace --all-targets --locked -- -D warnings
+cargo +1.98 test --all-targets --locked
+cargo +1.98 clippy --all-targets --locked -- -D warnings
 make smoke
 git add -A && git commit -m "chore(release): vX.Y.Z"
 git push origin master

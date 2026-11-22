@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/kensaku-core", "crates/kensaku"]
+# Excludes the vendored paddleocr_rs_onnx (a member only as a path dependency); CI runs these.
 default-members = ["crates/kensaku-core", "crates/kensaku"]
 
 [workspace.package]
@@ -8,10 +9,6 @@ version = "2.0.0-dev"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
-
-# Vendored paddleocr_rs_onnx 0.2.8 (MIT): shared ONNX env with Indra, single-thread sessions, bounded pool.
-[patch.crates-io]
-paddleocr_rs_onnx = { path = "crates/kensaku-core/vendor/paddleocr_rs_onnx" }
 
 [profile.release]
 # Thin LTO + parallel codegen: much faster builds, near-identical runtime.

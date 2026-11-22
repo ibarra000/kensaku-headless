@@ -87,7 +87,7 @@ reports it.
 ```bash
 make            # list tasks
 make build      # release build of the kensaku binary
-make test       # cargo test --workspace --all-targets
+make test       # cargo test --all-targets
 make lint       # clippy with warnings as errors
 make fmt        # cargo fmt --all
 make smoke      # end-to-end headless smoke test (throwaway data dir)

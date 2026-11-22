@@ -65,6 +65,7 @@ pub fn accurate_compiled() -> bool {
     cfg!(feature = "accurate-ocr")
 }
 
+#[cfg_attr(not(feature = "accurate-ocr"), allow(dead_code))]
 fn runtime_file_name() -> String {
     format!(
         "{}onnxruntime{}",
@@ -75,6 +76,7 @@ fn runtime_file_name() -> String {
 
 /// Bundled ONNX Runtime locations in try order. Never prefer a system copy
 /// (Windows System32 ships an old, API-incompatible `onnxruntime.dll`).
+#[cfg_attr(not(feature = "accurate-ocr"), allow(dead_code))]
 fn runtime_candidates(exe: &Path, file_name: &str) -> Vec<PathBuf> {
     let Some(dir) = exe.parent() else {
         return Vec::new();
@@ -417,7 +419,9 @@ fn accurate_engine() -> Option<std::sync::Arc<paddleocr_rs_onnx::OcrEngine>> {
 }
 
 /// Known-text image proving the engine actually reads.
+#[cfg_attr(not(feature = "accurate-ocr"), allow(dead_code))]
 pub(crate) const SELF_TEST_IMAGE: &[u8] = include_bytes!("../tests/fixtures/ocr-ui-text/001.png");
+#[cfg_attr(not(feature = "accurate-ocr"), allow(dead_code))]
 pub(crate) const SELF_TEST_EXPECTED: &str = "open settings";
 
 /// Reads a known image and checks the words (spaces included); cached once run

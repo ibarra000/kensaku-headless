@@ -27,8 +27,8 @@ System prerequisites: [`INSTALL.md`](INSTALL.md#prerequisites).
 CI runs these on Linux, macOS, and Windows with Rust 1.98:
 
 ```bash
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
 cargo build -p kensaku --locked
 tools/headless-smoke.sh target/debug/kensaku
 ```

@@ -19,10 +19,10 @@ build: ## Build the kensaku binary (release)
 	@echo "built: $(BIN)"
 
 test: ## Run the Rust test suite
-	cargo test --workspace --all-targets
+	cargo test --all-targets
 
 lint: ## Clippy with warnings as errors
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 fmt: ## Format Rust code
 	cargo fmt --all

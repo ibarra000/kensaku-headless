@@ -43,6 +43,8 @@
 //!
 //! No hardware acceleration features are enabled by default (CPU-only).
 //!
+// Vendored third-party code: not linted by Kensaku's CI.
+#![allow(clippy::all)]
 use parking_lot::{Mutex, Condvar};
 use std::collections::VecDeque;
 use log::{info, warn};

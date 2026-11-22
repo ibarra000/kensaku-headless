@@ -27,8 +27,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo test --workspace --all-targets --locked
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - name: Headless end-to-end smoke test
         shell: bash
         run: |

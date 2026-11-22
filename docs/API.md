@@ -190,6 +190,16 @@ curl -N -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/v1/events
 
 ## Rust
 
+`kensaku-core` is not on crates.io yet; depend on it from git (Rust 1.98+), pinned to a tag:
+
+```toml
+[dependencies]
+kensaku-core = { git = "https://github.com/ibarra000/kensaku-headless", tag = "v2.0.0" }
+```
+
+OCR needs the ONNX Runtime library at run time (next to your binary or via `ORT_DYLIB_PATH`;
+see [INSTALL.md](INSTALL.md#ocr)). Build without OCR with `default-features = false`.
+
 ```rust
 use kensaku_core::api::{Client, Engine, Kensaku};
 use kensaku_core::ops::setup::SetupRequest;

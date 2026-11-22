@@ -33,7 +33,9 @@ quick-xml = "0.42.0"
 zip = "9.1.0"
 ureq = { version = "2", features = ["tls", "json", "native-certs"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
-paddleocr_rs_onnx = { version = "0.2.8", default-features = false, optional = true }
+# Vendored 0.2.8 (MIT), modified: shared ONNX env with Indra, single-thread sessions, bounded pool.
+# A path dependency (not [patch]) so git dependents build the same code.
+paddleocr_rs_onnx = { path = "vendor/paddleocr_rs_onnx", version = "0.2.8", default-features = false, optional = true }
 # `load-dynamic`: the static onnxruntime needs glibc 2.38+; without the lib at runtime OCR falls back to Tesseract.
 ort = { version = "2.0.0-rc.15", optional = true, features = ["load-dynamic"] }
 interprocess = "2.4.7"

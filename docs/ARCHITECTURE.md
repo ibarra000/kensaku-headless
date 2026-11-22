@@ -347,8 +347,8 @@ binary does not contact GitHub or any other update service. See
 
 ## 11. Tests and benchmarks
 
-- **About 600 test functions** across `crates/`. CI runs `cargo test --workspace
-  --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+- **About 600 test functions** across `crates/`. CI runs `cargo test
+  --all-targets --locked`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `tools/headless-smoke.sh` against a built `kensaku` on Linux, macOS, and Windows.
 - **Eight benchmark harnesses** in `crates/kensaku-core/examples/`: `bench`, `bench_ocr`,
   `crawl_bench`, `embed`, `facet_bench`, `index_bench`, `index_format_bench`, and
