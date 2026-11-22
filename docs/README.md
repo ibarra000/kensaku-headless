@@ -30,7 +30,7 @@ These pages go deeper.
 | [BENCHMARKS.md](BENCHMARKS.md) | Harnesses, methodology, 100k Windows/Linux reference numbers, indexing/extraction measurements, caveats. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the checks CI runs, test expectations, style, performance changes. |
 | [RELEASING.md](RELEASING.md) | Version bump, CI release build, draft release review, asset checklist. |
-| [SIGNING.md](SIGNING.md) | Authenticode signing of the Windows binary through SignPath, and what is not signed. |
+| [SIGNING.md](SIGNING.md) | Planned Windows signing through SignPath (not active yet). |
 
 ## Conventions in these docs
 

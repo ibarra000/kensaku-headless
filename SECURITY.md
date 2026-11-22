@@ -81,8 +81,6 @@ should still be added to exclusions with `kensaku exclude add`.
 
 ## Release integrity
 
-Release archives are published with `SHA256SUMS`. The Windows `kensaku.exe` is
-Authenticode-signed through SignPath Foundation; macOS binaries are not signed or
-notarised yet. Verify downloads against `SHA256SUMS` on the GitHub release page, and check
-the Windows signature with `Get-AuthenticodeSignature`. The binary has no self-updater and
+Release archives are published with `SHA256SUMS`. Binaries are not code-signed yet.
+Verify downloads against `SHA256SUMS` on the GitHub release page. The binary has no self-updater and
 does not download replacements for itself. See `docs/INSTALL.md` and `docs/SIGNING.md`.

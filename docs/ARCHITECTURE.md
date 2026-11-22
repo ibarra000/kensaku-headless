@@ -340,8 +340,8 @@ archive, `kensaku-<version>-<target>.tar.gz` or `.zip`, with the binary, the ONN
 library where one is bundled, and the LICENSE and README. The workflow also writes
 `SHA256SUMS` and creates a draft GitHub release for a maintainer to review.
 
-The Windows `kensaku.exe` is Authenticode-signed through SignPath Foundation in the
-workflow. macOS binaries are not signed or notarised. There is no self-updater: the
+Release binaries are not code-signed yet; Windows signing through SignPath is
+prepared in the workflow and runs once configured. There is no self-updater: the
 binary does not contact GitHub or any other update service. See
 [RELEASING.md](RELEASING.md) and [SIGNING.md](SIGNING.md).
 
@@ -366,7 +366,7 @@ binary does not contact GitHub or any other update service. See
   skipped and `similar_images` self-hides.
 - No native macOS/Windows OCR.
 - No ANN index at desktop scale; exact scan is faster and exact.
-- No macOS code signing or notarisation yet; the Windows `kensaku.exe` is Authenticode-signed.
+- No code signing or notarisation yet.
 
 ## 13. Module map
 

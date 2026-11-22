@@ -29,12 +29,8 @@ sha256sum -c SHA256SUMS --ignore-missing     # Linux, macOS (or: shasum -a 256 -
 Get-FileHash .\kensaku-<ver>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
-**Windows.** `kensaku.exe` is Authenticode-signed through
-[SignPath Foundation](https://signpath.org/). After unpacking, check it with:
-
-```powershell
-Get-AuthenticodeSignature .\kensaku.exe | Format-List Status, SignerCertificate
-```
+**Windows.** `kensaku.exe` is not code-signed yet, so SmartScreen may warn on first
+run. Choose **More info → Run anyway**, or unblock the file with `Unblock-File .\kensaku.exe`.
 
 **macOS.** Binaries are not signed or notarised yet, so Gatekeeper blocks the first
 run. Clear the quarantine flag on the unpacked binary:
@@ -45,7 +41,7 @@ xattr -d com.apple.quarantine ./kensaku
 
 **Linux.** No signing step. `SHA256SUMS` is the integrity check.
 
-Build and signing details are in [SIGNING.md](SIGNING.md).
+Signing is planned; see [SIGNING.md](SIGNING.md).
 
 ---
 

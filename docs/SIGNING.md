@@ -1,18 +1,17 @@
 # Signing
 
-Kensaku Headless's Windows binaries are Authenticode-signed through
-[SignPath Foundation](https://signpath.org/), which issues an open-source code
-signing certificate and keeps the private key on its HSM. Nothing is signed
-on a maintainer machine.
+> **Status: not active.** Releases are currently unsigned. This page is the plan
+> for Windows signing through [SignPath Foundation](https://signpath.org/);
+> `release.yml` skips signing until the variables below are set.
 
 | Platform | Artifact | Signed |
 |---|---|---|
-| Windows x86_64 | `kensaku.exe` inside `kensaku-<ver>-x86_64-pc-windows-msvc.zip` | Authenticode (SHA-256, timestamped) |
-| Windows ARM64 | `kensaku.exe` inside `kensaku-<ver>-aarch64-pc-windows-msvc.zip` | Authenticode (SHA-256, timestamped) |
+| Windows x86_64 | `kensaku.exe` inside `kensaku-<ver>-x86_64-pc-windows-msvc.zip` | Planned: Authenticode (SHA-256, timestamped) |
+| Windows ARM64 | `kensaku.exe` inside `kensaku-<ver>-aarch64-pc-windows-msvc.zip` | Planned: Authenticode (SHA-256, timestamped) |
 | macOS | the `kensaku` binary in the `.tar.gz` archives | **No** — needs an Apple Developer ID certificate and notarisation |
 | Linux | the `kensaku` binary in the `.tar.gz` archive | **No** — verify with `SHA256SUMS` |
 
-Each Windows archive holds one signed binary. The installers, the portable zip, and the
+Once active, each Windows archive holds one signed binary. The installers, the portable zip, and the
 separate CLI binaries of the original desktop Kensaku are gone. macOS Gatekeeper instructions are in
 [INSTALL.md](INSTALL.md). `SHA256SUMS` is still published for every release and
 remains the integrity check for all platforms.
@@ -37,8 +36,8 @@ certificate; it has its own (below).
 
 ## One-time setup (SignPath + GitHub)
 
-Do this once. The workflow fails fast on Windows if anything is missing, so a
-tag build can never quietly ship an unsigned binary.
+Do this once. Until every variable and the secret are set, the workflow skips
+signing and logs a warning; once they are, Windows builds are signed automatically.
 
 1. **Apply to SignPath Foundation** for `ibarra000/kensaku-headless` at
    [signpath.org/apply](https://signpath.org/apply). The project must be OSI

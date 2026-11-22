@@ -35,7 +35,7 @@ kept for reference.
 - **Rust 1.98 is required** (`rust-version` in the workspace).
 - **New release artifacts.** One archive per target, `kensaku-<version>-<target>.zip` or
   `.tar.gz`, with the binary, the ONNX Runtime library (not on Intel macOS), LICENSE, and
-  README. `SHA256SUMS` covers them. The Windows `kensaku.exe` is the only signed artifact.
+  README. `SHA256SUMS` covers them. Binaries are unsigned for now.
 - **Removed flags and scripts.** `--toggle`, the GUI `--remove-data` flag, and the reset
   script are replaced by `kensaku reset --yes [--remove-packs]` and
   `kensaku remove-data --yes`.

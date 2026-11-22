@@ -95,8 +95,7 @@ No. The binary never contacts GitHub or any update service. Download new release
 `SHA256SUMS`. See [INSTALL.md](INSTALL.md#release-archives).
 
 **Is the binary signed?**
-The Windows `kensaku.exe` is Authenticode-signed through SignPath Foundation. macOS
-binaries are not signed or notarised yet, so Gatekeeper blocks the first run. Clear the
+Not yet. Windows SmartScreen may warn on first run, and macOS Gatekeeper blocks it. Clear the
 quarantine flag with `xattr -d com.apple.quarantine ./kensaku`. See
 [INSTALL.md](INSTALL.md#release-archives).
 

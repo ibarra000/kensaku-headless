@@ -43,9 +43,8 @@ Each archive holds the `kensaku` binary, the ONNX Runtime library (not on Intel 
 and the LICENSE and README. The workflow smoke-tests the packaged binary with `--version`
 and `methods`.
 
-Windows jobs fail if the SignPath variables or the `SIGNPATH_API_TOKEN` secret are
-missing, so an unsigned Windows binary cannot reach a release. See
-[SIGNING.md](SIGNING.md).
+Windows signing is skipped until the SignPath variables are set, so releases are
+currently unsigned. See [SIGNING.md](SIGNING.md).
 
 ## 3. Review and publish the draft
 
@@ -83,13 +82,12 @@ gh release edit vX.Y.Z --draft=false --latest
 
 - The release page lists all five archives and `SHA256SUMS`.
 - Download one archive, check its checksum, unpack it, and run `kensaku --version`.
-- On a Windows archive, `Get-AuthenticodeSignature .\kensaku.exe` reports `Valid`.
 - Run `kensaku setup --root <dir> --wait` against a throwaway `--data-dir` and check
   `kensaku search` against it.
 
 ## Signing and notarization
 
-- Windows: `kensaku.exe` is signed through SignPath Foundation. The configuration is in
-  [SIGNING.md](SIGNING.md) and `docs/signing/signpath-artifact-config.xml`.
+- Windows: not signed yet. SignPath signing is wired into `release.yml` and runs once
+  the variables in [SIGNING.md](SIGNING.md) are set.
 - macOS: archives are not signed or notarised. Notarisation needs an Apple Developer ID,
   which the release workflow does not use yet.
