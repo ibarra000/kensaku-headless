@@ -28,7 +28,9 @@ gh run watch   # or: gh run list --workflow=release.yml
 ```
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds `kensaku` for five
-targets, packs each one, and signs the Windows binaries. The workflow names archives from
+targets and packs each one (Windows signing runs only once SignPath is configured).
+Push one tag at a time; never `git push --tags`. The upstream `v1.0.x` tags are not
+kept in this repo, and every pushed `v*` tag starts a release build. The workflow names archives from
 the tag without the `v`, so use the same version in the tag and in `Cargo.toml`.
 
 | Target | Archive |
