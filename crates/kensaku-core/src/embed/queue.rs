@@ -46,11 +46,11 @@ impl EmbeddingQueue {
         status_sink: &Option<StatusSink>,
         status: &Option<Arc<RwLock<IndexingStatus>>>,
     ) {
-        if let (Some(sink_arc), Some(st_arc)) = (status_sink, status) {
-            if let Some(listener) = sink_arc.read().as_ref() {
-                let st = st_arc.read().clone();
-                listener(&st);
-            }
+        if let (Some(sink_arc), Some(st_arc)) = (status_sink, status)
+            && let Some(listener) = sink_arc.read().as_ref()
+        {
+            let st = st_arc.read().clone();
+            listener(&st);
         }
     }
 
