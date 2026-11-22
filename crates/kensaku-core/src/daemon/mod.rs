@@ -250,6 +250,8 @@ pub fn spawn() -> Result<(), ApiError> {
         .stdout(log)
         .stderr(log_err);
     detach(&mut command);
+    #[cfg(windows)]
+    let _guard = std_handles_not_inherited();
     command
         .spawn()
         .map(|_| ())
@@ -264,6 +266,46 @@ fn detach(command: &mut std::process::Command) {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
+
+/// Windows spawns with handle inheritance on, so the daemon would keep the caller's
+/// stdout/stderr pipes open and `kensaku ... | tail` would never see EOF. Clears the
+/// inherit flag on our std handles for the spawn; the guard restores it.
+#[cfg(windows)]
+fn std_handles_not_inherited() -> impl Drop {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{
+        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+    };
+
+    struct Restore(Vec<HANDLE>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for &h in &self.0 {
+                // SAFETY: h is one of this process's std handles, still open.
+                let _ = unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT) };
+            }
+        }
+    }
+
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    let mut cleared = Vec::new();
+    for raw in handles.into_iter().filter(|h| !h.is_null()) {
+        let h = HANDLE(raw);
+        let mut flags = 0u32;
+        // SAFETY: valid std handle; failures leave the handle unchanged.
+        let inheritable = unsafe { GetHandleInformation(h, &mut flags) }.is_ok()
+            && flags & HANDLE_FLAG_INHERIT.0 != 0;
+        if inheritable && unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }.is_ok() {
+            cleared.push(h);
+        }
+    }
+    Restore(cleared)
+}
+
 
 #[cfg(unix)]
 fn detach(command: &mut std::process::Command) {

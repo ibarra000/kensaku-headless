@@ -61,6 +61,15 @@ echo "== read-only mode without the daemon"
 k daemon stop
 k --no-daemon search fox | grep -q notes.txt || fail "--no-daemon search"
 
+echo "== spawning the daemon releases the caller's output pipe"
+( k status | cat >/dev/null ) & pipe_pid=$!
+for _ in $(seq 1 30); do kill -0 "$pipe_pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$pipe_pid" 2>/dev/null; then
+  k daemon stop >/dev/null 2>&1 || true
+  fail "the spawned daemon kept the caller's stdout pipe open"
+fi
+wait "$pipe_pid" || fail "piped status"
+
 echo "== reset"
 expect_exit 2 k reset
 k reset --yes
