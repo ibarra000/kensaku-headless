@@ -1750,6 +1750,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "kensaku-core",
+ "libc",
  "serde_json",
 ]
 

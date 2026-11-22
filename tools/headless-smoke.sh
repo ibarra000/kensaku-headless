@@ -47,8 +47,8 @@ k index pause
 k index resume
 
 echo "== raw API and method list"
-k call ping | grep -q '"ok": true' || fail "call ping"
-k methods | grep -q '^search' || fail "methods list"
+grep -q '"ok": true' <<<"$(k call ping)" || fail "call ping"
+grep -q '^search' <<<"$(k methods)" || fail "methods list"
 expect_exit 2 k call no_such_method
 
 echo "== MCP stdio"
