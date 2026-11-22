@@ -16,9 +16,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  ORT_VERSION: "1.31.0"
-
 jobs:
   build:
     name: Build (${{ matrix.target }})
@@ -30,36 +27,20 @@ jobs:
         include:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            ort_archive: onnxruntime-linux-x64
-            ort_ext: tgz
-            ort_sha256: cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57
-            ort_lib: libonnxruntime.so.1.31.0
-            ort_dest: libonnxruntime.so
+            ort_rid: linux-x64
           - platform: macos-latest
             target: aarch64-apple-darwin
-            ort_archive: onnxruntime-osx-arm64
-            ort_ext: tgz
-            ort_sha256: 1031b36dd3bdaa8d976a6130d9cf2a05e9be320b93ae804f8427b91dc3432afc
-            ort_lib: libonnxruntime.1.31.0.dylib
-            ort_dest: libonnxruntime.dylib
+            ort_rid: osx-arm64
           # Intel Macs: no bundled ONNX Runtime; OCR falls back to Tesseract.
           - platform: macos-latest
             target: x86_64-apple-darwin
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            ort_archive: onnxruntime-win-x64
-            ort_ext: zip
-            ort_sha256: 3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195
-            ort_lib: onnxruntime.dll
-            ort_dest: onnxruntime.dll
+            ort_rid: win-x64
           # ONNX Runtime DLL must match the process architecture.
           - platform: windows-11-arm
             target: aarch64-pc-windows-msvc
-            ort_archive: onnxruntime-win-arm64
-            ort_ext: zip
-            ort_sha256: ef6206fa8d6975878d93a97035d280240ce5764c126a7430e5427e18923316d5
-            ort_lib: onnxruntime.dll
-            ort_dest: onnxruntime.dll
+            ort_rid: win-arm64
 
     steps:
       - uses: actions/checkout@v7
@@ -100,7 +81,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p kensaku --target ${{ matrix.target }}
 
-      - name: Stage binary and ONNX Runtime
+      - name: Stage binary
         shell: bash
         run: |
           set -euo pipefail
@@ -112,21 +93,15 @@ jobs:
           exe=kensaku; [ "$RUNNER_OS" = Windows ] && exe=kensaku.exe
           cp "target/${{ matrix.target }}/release/$exe" "$stage/$exe"
           cp LICENSE README.md "$stage/"
-          if [ -n "${{ matrix.ort_archive }}" ]; then
-            base="${{ matrix.ort_archive }}-${ORT_VERSION}"
-            archive="$RUNNER_TEMP/$base.${{ matrix.ort_ext }}"
-            curl -fsSL --retry 3 -o "$archive" \
-              "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/$base.${{ matrix.ort_ext }}"
-            if command -v sha256sum >/dev/null; then sum=$(sha256sum < "$archive"); else sum=$(shasum -a 256 < "$archive"); fi
-            [ "${sum%% *}" = "${{ matrix.ort_sha256 }}" ] || { echo "ONNX Runtime checksum mismatch"; exit 1; }
-            case "${{ matrix.ort_ext }}" in
-              zip) unzip -q "$archive" -d "$RUNNER_TEMP" ;;
-              *) tar xzf "$archive" -C "$RUNNER_TEMP" ;;
-            esac
-            cp "$RUNNER_TEMP/$base/lib/${{ matrix.ort_lib }}" "$stage/${{ matrix.ort_dest }}"
-          fi
           echo "STAGE=$stage" >> "$GITHUB_ENV"
           echo "ARCHIVE_NAME=$name" >> "$GITHUB_ENV"
+
+      - name: Bundle ONNX Runtime
+        if: matrix.ort_rid != ''
+        uses: ./.github/actions/onnxruntime
+        with:
+          rid: ${{ matrix.ort_rid }}
+          dest: ${{ env.STAGE }}
 
       - name: Upload unsigned binary for signing
         if: steps.signing.outputs.enabled == 'true'

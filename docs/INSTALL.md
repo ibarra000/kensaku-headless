@@ -162,6 +162,10 @@ with different protocol versions refuse each other.
 OCR works out of the box. The PP-OCRv6 engine (`accurate`) is compiled into normal
 builds, and its ~6.1 MB model pack is downloaded when OCR is enabled and the pack is
 missing. Release archives bundle ONNX Runtime for Windows, Apple silicon, and Linux x64.
+Source builds need the library too: take it from the
+[`Microsoft.ML.OnnxRuntime`](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.31.0)
+NuGet package (it is a zip; the file is under `runtimes/<rid>/native/`) and put it next to
+`kensaku` or set `ORT_DYLIB_PATH`.
 
 Pick the engine at setup, or change it later with configuration:
 

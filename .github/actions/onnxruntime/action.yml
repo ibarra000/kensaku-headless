@@ -1,0 +1,49 @@
+name: ONNX Runtime
+description: Fetch the ONNX Runtime shared library from Microsoft's NuGet package (GitHub releases are gone).
+
+inputs:
+  rid:
+    description: NuGet runtime id (linux-x64, osx-arm64, win-x64, win-arm64).
+    required: true
+  dest:
+    description: Directory to copy the library into.
+    required: true
+
+outputs:
+  path:
+    description: Full path of the extracted library.
+    value: ${{ steps.extract.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/ort-nuget
+        key: onnxruntime-nuget-1.31.0
+
+    - id: extract
+      shell: bash
+      env:
+        ORT_VERSION: "1.31.0"
+        ORT_NUPKG_SHA256: 7e35fdb4f5adb62f01e60798e2e5ed05108f5fbbe1cca03fbcc37903cf7c5e3b
+        RID: ${{ inputs.rid }}
+        DEST: ${{ inputs.dest }}
+      run: |
+        set -euo pipefail
+        pkg="$RUNNER_TEMP/ort-nuget/onnxruntime.$ORT_VERSION.nupkg"
+        if [ ! -f "$pkg" ]; then
+          mkdir -p "$(dirname "$pkg")"
+          curl -fsSL --retry 3 -o "$pkg" \
+            "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/$ORT_VERSION/microsoft.ml.onnxruntime.$ORT_VERSION.nupkg"
+        fi
+        if command -v sha256sum >/dev/null; then sum=$(sha256sum < "$pkg"); else sum=$(shasum -a 256 < "$pkg"); fi
+        [ "${sum%% *}" = "$ORT_NUPKG_SHA256" ] || { echo "ONNX Runtime package checksum mismatch"; rm -f "$pkg"; exit 1; }
+        case "$RID" in
+          win-*) lib=onnxruntime.dll ;;
+          osx-*) lib=libonnxruntime.dylib ;;
+          *) lib=libonnxruntime.so ;;
+        esac
+        mkdir -p "$DEST"
+        unzip -o -j -q "$pkg" "runtimes/$RID/native/$lib" -d "$DEST"
+        echo "path=$DEST/$lib" >> "$GITHUB_OUTPUT"
