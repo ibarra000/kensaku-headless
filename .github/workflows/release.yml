@@ -206,6 +206,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # Notes: this version's CHANGELOG section.
+          awk -v v="${TAG#v}" 'index($0, "## [" v "]")==1{f=1;next} /^## \[/{if(f)exit} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no CHANGELOG entry for $TAG"; exit 1; }
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --draft --title "Kensaku $TAG" --generate-notes
+            gh release create "$TAG" --draft --title "Kensaku $TAG" --notes-file notes.md
           find release -type f -print0 | xargs -0 gh release upload "$TAG" --clobber
