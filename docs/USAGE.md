@@ -344,3 +344,11 @@ Results are deterministic: score, then path.
 - **Cloud placeholders** (Windows OneDrive/iCloud, and macOS iCloud Drive via
   the APFS `SF_DATALESS` flag) are indexed by name only, so reading doesn't
   hydrate the file. Their sparse folders are listed but not descended into.
+  Once a file is downloaded (OneDrive: *Always keep on this device*), the next
+  crawl or file event reads its content, even though its size and date are
+  unchanged. Files indexed as placeholders before 2.0.1 need one
+  `kensaku index rebuild`.
+- **Network drives** (Windows) — add a mapped drive (`Z:\Docs`) or a UNC path
+  (`\\server\share\Docs`); both are stored as the UNC path. A drive letter is
+  mapped per logon session, so a daemon running elevated or as another user
+  cannot see `Z:` — use the UNC path there.

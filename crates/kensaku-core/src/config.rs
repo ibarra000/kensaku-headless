@@ -294,7 +294,17 @@ pub fn normalize_language(raw: &str) -> Option<String> {
 }
 
 /// Version written by this build; see `parse_and_migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 7;
+pub const CURRENT_CONFIG_VERSION: u32 = 8;
+
+/// `UNC\srv\share\x` -> `\\srv\share\x`; other paths unchanged.
+fn repair_stripped_unc(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter()
+        .map(|dir| match dir.to_str().and_then(|s| s.strip_prefix(r"UNC\")) {
+            Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+            None => dir.clone(),
+        })
+        .collect()
+}
 
 /// Extensions skipped entirely (not even indexed by name).
 const DEFAULT_EXCLUDED_EXTENSIONS: &[&str] = &[
@@ -550,6 +560,14 @@ impl KensakuConfig {
             // v7: normalize language; unknown codes -> auto-detect.
             cfg.language = cfg.language.as_deref().and_then(normalize_language);
             cfg.config_version = 7;
+            migrated = true;
+        }
+
+        if cfg.config_version < 8 {
+            // v8 (2.0.1): network roots were saved as `UNC\srv\share` (a relative path).
+            cfg.watched_dirs = repair_stripped_unc(&cfg.watched_dirs);
+            cfg.name_only_dirs = repair_stripped_unc(&cfg.name_only_dirs);
+            cfg.config_version = 8;
             migrated = true;
         }
 
@@ -881,6 +899,28 @@ mod tests {
         assert_eq!(cfg.content_max_file_size_mb, 5);
         assert_eq!(cfg.content_max_text_bytes, 200_000);
         assert_eq!(cfg.content_max_semantic_units, 8);
+    }
+
+    #[test]
+    fn v8_repairs_roots_saved_with_stripped_unc_prefix() {
+        let broken = r#"{
+            "watched_dirs": ["UNC\\server\\share\\Docs", "C:\\Users\\me"],
+            "name_only_dirs": ["UNC\\nas\\media"],
+            "excluded_dirs": [], "excluded_extensions": [],
+            "shortcut": "Alt+Space", "max_results": 50, "is_setup_complete": true,
+            "config_version": 7
+        }"#;
+        let (cfg, migrated) = KensakuConfig::parse_and_migrate(broken).unwrap();
+        assert!(migrated);
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            cfg.watched_dirs,
+            vec![
+                PathBuf::from(r"\\server\share\Docs"),
+                PathBuf::from(r"C:\Users\me")
+            ]
+        );
+        assert_eq!(cfg.name_only_dirs, vec![PathBuf::from(r"\\nas\media")]);
     }
 
     #[test]

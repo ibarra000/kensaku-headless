@@ -64,11 +64,29 @@ pub fn validate_directory(path: &str) -> Result<String, String> {
         .map_err(|e| format!("Could not resolve {}: {}", candidate.display(), e))?
         .to_string_lossy()
         .to_string();
-    // Strip Windows' `\?\` extended-length prefix from canonicalize().
-    Ok(canonical
-        .strip_prefix("\\\\?\\")
-        .map(str::to_string)
-        .unwrap_or(canonical))
+    Ok(simplify_verbatim(&canonical))
+}
+
+/// Turns Windows' verbatim `canonicalize()` output into an ordinary path:
+/// `\\?\UNC\srv\share\x` -> `\\srv\share\x` (mapped drives resolve to UNC) and
+/// `\\?\C:\x` -> `C:\x`. Other forms (e.g. `\\?\Volume{..}`) are left verbatim.
+pub fn simplify_verbatim(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if is_drive_path(rest) => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// `C:\...` or bare `C:`.
+fn is_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'\\')
 }
 
 fn validate_all(paths: &[String]) -> Result<Vec<PathBuf>, String> {
@@ -140,6 +158,26 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn simplify_verbatim_rewrites_unc_to_double_backslash() {
+        assert_eq!(
+            simplify_verbatim(r"\\?\UNC\server\share\Docs"),
+            r"\\server\share\Docs"
+        );
+    }
+
+    #[test]
+    fn simplify_verbatim_strips_drive_letter_prefix() {
+        assert_eq!(simplify_verbatim(r"\\?\C:\Users\me"), r"C:\Users\me");
+    }
+
+    #[test]
+    fn simplify_verbatim_leaves_other_paths_unchanged() {
+        for path in [r"C:\Users\me", r"\\server\share", "/home/me", r"\\?\Volume{abc}\x"] {
+            assert_eq!(simplify_verbatim(path), path);
+        }
     }
 
     #[test]

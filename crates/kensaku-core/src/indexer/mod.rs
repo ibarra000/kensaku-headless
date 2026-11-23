@@ -87,6 +87,20 @@ fn is_unchanged(existing: &FileEntry, entry: &FileEntry) -> bool {
     existing.modified == entry.modified && existing.size == entry.size && !existing.content_pending
 }
 
+/// A cloud-only file deferred (marked pending) by an earlier crawl that is still cloud-only.
+/// Downloading keeps mtime/size, so the pending flag is what triggers the re-read; until then
+/// there is nothing to do. `is_placeholder` (a stat) only runs for pending, same-stamp entries.
+fn is_still_deferred(
+    existing: &FileEntry,
+    entry: &FileEntry,
+    is_placeholder: impl FnOnce() -> bool,
+) -> bool {
+    existing.content_pending
+        && existing.modified == entry.modified
+        && existing.size == entry.size
+        && is_placeholder()
+}
+
 /// One file scheduled for text extraction in the current crawl.
 struct ExtractJob {
     node_id: u64,
@@ -741,9 +755,12 @@ impl IndexerManager {
 
                 // Read-lock check first so an unchanged tree never takes the write lock.
                 let previous = { metadata.read().get(&entry.path) };
-                let unchanged = previous
-                    .as_ref()
-                    .is_some_and(|existing| is_unchanged(existing, &entry));
+                let unchanged = previous.as_ref().is_some_and(|existing| {
+                    is_unchanged(existing, &entry)
+                        || is_still_deferred(existing, &entry, || {
+                            is_cloud_placeholder_path(&entry.path)
+                        })
+                });
                 if unchanged {
                     continue;
                 }
@@ -786,13 +803,17 @@ impl IndexerManager {
                     continue;
                 }
 
-                // Cloud placeholders stay metadata-only so indexing does not hydrate them.
-                if !entry.is_dir
+                let extractable = !entry.is_dir
                     && (is_indexable_extension(entry.extension)
                         || is_indexable_file_name(&entry.name)
-                        || crate::indexer::extract::external::handles(&entry.path))
-                    && !is_cloud_placeholder_path(&entry.path)
-                {
+                        || crate::indexer::extract::external::handles(&entry.path));
+                // Cloud placeholders stay metadata-only so indexing does not hydrate them, but
+                // are left pending: once downloaded, the next crawl re-reads them.
+                if extractable && is_cloud_placeholder_path(&entry.path) {
+                    if !was_pending {
+                        metadata.write().set_content_pending(&entry.path);
+                    }
+                } else if extractable {
                     // Pending until extracted, so a crawl killed mid-way re-reads these next launch.
                     metadata.write().set_content_pending(&entry.path);
                     to_extract.push(ExtractJob {
@@ -2277,6 +2298,28 @@ mod tests {
             !is_unchanged(&pending, &entry(100, 10, false)),
             "a pending entry must be re-processed even when mtime/size match"
         );
+    }
+
+    #[test]
+    fn deferred_cloud_file_is_skipped_only_while_still_cloud_only() {
+        let deferred = entry(100, 10, true);
+        assert!(
+            is_still_deferred(&deferred, &entry(100, 10, false), || true),
+            "a still-cloud-only pending file needs no work"
+        );
+        assert!(
+            !is_still_deferred(&deferred, &entry(100, 10, false), || false),
+            "once downloaded (same mtime/size) it must be extracted"
+        );
+        assert!(!is_still_deferred(&deferred, &entry(101, 10, false), || true));
+    }
+
+    #[test]
+    fn deferred_check_does_not_stat_files_that_are_not_pending() {
+        let not_pending = entry(100, 10, false);
+        assert!(!is_still_deferred(&not_pending, &entry(100, 10, false), || {
+            panic!("placeholder probe must not run for non-pending entries")
+        }));
     }
 
     #[test]
