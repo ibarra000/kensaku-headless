@@ -1746,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "kensaku"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "kensaku-core"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "cfb",
  "dirs",

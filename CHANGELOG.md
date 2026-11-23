@@ -3,7 +3,7 @@
 All notable changes to Kensaku Headless. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning: [SemVer](https://semver.org/).
 
-## [2.0.0] — Unreleased
+## [2.0.0] — 2026-11-22
 
 Breaking: Kensaku is now a headless command-line program. The desktop app is gone.
 
